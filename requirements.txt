@@ -1,0 +1,12 @@
+torch>=2.5,<3.0
+numpy>=1.26,<3.0
+matplotlib>=3.8
+pillow>=10.0
+tqdm>=4.66
+pytest>=8.0
+
+# Decoder explorer (scripts/decoder_explorer.py); optional for the rest.
+streamlit>=1.30
+plotly>=5.18
+umap-learn>=0.5
+streamlit-plotly-events>=0.0.6
