@@ -41,8 +41,7 @@ python -m jepa_tetris.train \
 
 echo "==> Training complete."
 if [ -n "${RUNPOD_POD_ID:-}" ]; then
-  echo "==> Stopping pod..."
-  runpodctl pod stop "$RUNPOD_POD_ID"
-else
-  echo "==> RUNPOD_POD_ID not set; skipping pod stop (not running on RunPod)."
+  echo "==> Stopping pod $RUNPOD_POD_ID..."
+  runpodctl pod stop "$RUNPOD_POD_ID" || true  # don't crash if runpodctl fails
+  sleep 30  # give RunPod time to process the stop before container exits
 fi
