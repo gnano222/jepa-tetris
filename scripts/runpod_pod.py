@@ -127,7 +127,7 @@ def cmd_download(args):
         try:
             pod = runpod.create_pod(
                 name="jepa-download",
-                image_name="runpod/base:0.4.4-py3.11",
+                image_name="runpod/base:1.0.3-ubuntu2204",
                 gpu_type_id=None,
                 instance_id=instance_id,
                 network_volume_id=volume_id,
