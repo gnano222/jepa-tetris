@@ -1,4 +1,11 @@
-"""JEPA training loop with EMA target encoder and VICReg anti-collapse regularizers."""
+"""JEPA training loop with EMA target encoder and VICReg anti-collapse regularizers.
+
+The predictor is trained with **teacher-forced multi-step** prediction (DINO-WM
+convention). Each batch is a window of H+1 consecutive frames; the encoder is
+applied to all frames, and the predictor is run independently at each of the H
+positions from the *real* encoded frame (no autoregressive chain). The H
+single-step losses are averaged.
+"""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +21,6 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
 from jepa_tetris.data.replay_buffer import (
-    NUM_ACTIONS,
     CounterfactualReplayBuffer,
     ReplayBuffer,
 )
@@ -27,12 +33,20 @@ from jepa_tetris.utils.run_paths import run_dir
 from jepa_tetris.utils.seed import set_seed
 
 
+def _flatten_for_stats(z: torch.Tensor) -> torch.Tensor:
+    """(*, D) -> (samples, D). Treats every patch in every batch element as one
+    sample for variance/covariance computations (I-JEPA / V-JEPA convention)."""
+    return z.reshape(-1, z.shape[-1])
+
+
 def variance_loss(z: torch.Tensor, target_std: float = 1.0, eps: float = 1e-4) -> torch.Tensor:
+    z = _flatten_for_stats(z)
     std = torch.sqrt(z.var(dim=0) + eps)
     return F.relu(target_std - std).mean()
 
 
 def covariance_loss(z: torch.Tensor) -> torch.Tensor:
+    z = _flatten_for_stats(z)
     n, d = z.shape
     z = z - z.mean(dim=0, keepdim=True)
     cov = (z.T @ z) / max(n - 1, 1)
@@ -43,61 +57,42 @@ def covariance_loss(z: torch.Tensor) -> torch.Tensor:
 def counterfactual_step_loss(
     *,
     s0: torch.Tensor,
-    next_states_k: torch.Tensor,
-    actions_executed: torch.Tensor,
+    next_states: torch.Tensor,
     encoder: torch.nn.Module,
     target_encoder: torch.nn.Module,
     action_encoder: torch.nn.Module,
     predictor: torch.nn.Module,
 ) -> dict:
-    """Compute the counterfactual JEPA loss for one (possibly K-step) batch.
+    """Single-step counterfactual JEPA loss.
 
-    At every rollout step t, the predictor is run on all NUM_ACTIONS action
-    embeddings against the same `z_chain` to produce ẑ_{t,a} for every a; the
-    target is the (stop-grad) target encoder applied to the corresponding
-    `next_states_k[:, t, a]`. The chain's next latent is the predicted ẑ for
-    the action that was actually executed at step t.
+    For every starting state, the predictor is run on all A action embeddings
+    against the same z0 to produce ẑ_a for every a; the target is the
+    (stop-grad) target encoder applied to `next_states[:, a]`.
 
     Shapes:
-        s0:               (B, 2, 20, 10)
-        next_states_k:    (B, K, A, 2, 20, 10)
-        actions_executed: (B, K) integer
+        s0:           (B, 2, 20, 10)
+        next_states:  (B, A, 2, 20, 10)
 
-    Returns:
-        {"mse": scalar tensor, "z_pred_all": (B, A, D) at the FINAL step (for
-         logging cos_sim / VICReg), "n_predictions": int}.
+    Returns {"mse": scalar, "z_pred_all": (B, A, N, D), "n_predictions": int}.
     """
-    B, K, A = next_states_k.shape[:3]
-    D = encoder(s0[:1]).shape[-1]
-    state_shape = next_states_k.shape[3:]
+    B, A = next_states.shape[:2]
+    state_shape = next_states.shape[2:]
 
-    z_chain = encoder(s0)                                          # (B, D)
-    mse_terms = []
-    z_pred_last = None
-    for t in range(K):
-        # Predict all A actions from the current chain latent.
-        actions_all = torch.arange(A, device=z_chain.device).repeat(B)        # (B*A,)
-        z_chain_repeat = z_chain.repeat_interleave(A, dim=0)                  # (B*A, D)
-        a_emb_all = action_encoder(actions_all)                               # (B*A, E)
-        z_pred_flat = predictor(z_chain_repeat, a_emb_all)                    # (B*A, D)
-        z_pred_all = z_pred_flat.view(B, A, D)                                # (B, A, D)
+    z0 = encoder(s0)                                                       # (B, N, D)
+    _, N, D = z0.shape
 
-        s_next_t = next_states_k[:, t]                                        # (B, A, *)
-        s_next_flat = s_next_t.reshape(B * A, *state_shape)
-        with torch.no_grad():
-            z_target_all = target_encoder(s_next_flat).view(B, A, D)
+    actions_all = torch.arange(A, device=z0.device).repeat(B)              # (B*A,)
+    z_repeat = z0.repeat_interleave(A, dim=0)                              # (B*A, N, D)
+    a_emb_all = action_encoder(actions_all)                                # (B*A, D)
+    z_pred_flat = predictor(z_repeat, a_emb_all)                           # (B*A, N, D)
+    z_pred_all = z_pred_flat.view(B, A, N, D)                              # (B, A, N, D)
 
-        mse_terms.append(F.mse_loss(z_pred_all, z_target_all))
-        z_pred_last = z_pred_all
+    s_next_flat = next_states.reshape(B * A, *state_shape)
+    with torch.no_grad():
+        z_target_all = target_encoder(s_next_flat).view(B, A, N, D)
 
-        if t < K - 1:
-            # Continue the chain along the executed action's prediction.
-            a_exec_t = actions_executed[:, t].to(z_chain.device).long()       # (B,)
-            idx = a_exec_t.view(B, 1, 1).expand(-1, 1, D)
-            z_chain = z_pred_all.gather(1, idx).squeeze(1)                    # (B, D)
-
-    mse = torch.stack(mse_terms).mean()
-    return {"mse": mse, "z_pred_all": z_pred_last, "n_predictions": B * K * A}
+    mse = F.mse_loss(z_pred_all, z_target_all)
+    return {"mse": mse, "z_pred_all": z_pred_all, "n_predictions": B * A}
 
 
 @torch.no_grad()
@@ -130,7 +125,8 @@ def main():
     parser.add_argument("--steps", type=int, default=50_000)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--latent-dim", type=int, default=64)
+    parser.add_argument("--patch-dim", type=int, default=128,
+                        help="Per-patch channel dim D (= encoder's final conv channels).")
     parser.add_argument("--ema-tau", type=float, default=0.99)
     parser.add_argument("--var-weight", type=float, default=1.0)
     parser.add_argument("--cov-weight", type=float, default=0.04)
@@ -138,20 +134,35 @@ def main():
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=5000)
     parser.add_argument("--run", default=None,
-                        help="Run name. Log goes to results/<YYYYMMDD-HHMMSS>[_<run>]/train_log.jsonl. "
-                             "Ignored if --log-file is given.")
+                        help="Run name. Log goes to results/<YYYYMMDD-HHMMSS>[_<run>]/train_log.jsonl.")
     parser.add_argument("--log-file", default=None,
                         help="Explicit training log path. Overrides --run.")
-    parser.add_argument("--rollout-k", type=int, default=1,
-                        help="Train predictor on K-step rollouts (1 = standard JEPA, >1 = multi-step).")
-    parser.add_argument("--predictor-hidden", type=int, default=256)
+    parser.add_argument("--horizon-h", type=int, default=4,
+                        help="Multi-step prediction horizon. Sample H+1-frame windows; "
+                             "predictor runs H steps (teacher-forced from real frames by "
+                             "default, autoregressive with --autoregressive). H=1 = single-step.")
+    parser.add_argument("--autoregressive", action="store_true",
+                        help="Train predictor autoregressively: feed its own output forward "
+                             "for H steps instead of teacher-forcing from real encoded frames. "
+                             "Better at deep rollouts; worse single-step calibration.")
+    parser.add_argument("--ar-weight", type=float, default=0.0,
+                        help="In teacher-forced mode, add an autoregressive H-step rollout "
+                             "loss with this weight on top of the teacher-forced MSE. "
+                             "0 = pure teacher-forced; 0.25 = mixed; ignored if --autoregressive.")
+    parser.add_argument("--predictor-heads", type=int, default=4,
+                        help="Attention heads in the predictor transformer.")
     parser.add_argument("--predictor-depth", type=int, default=2,
-                        help="Number of hidden Linear+GELU blocks in the predictor MLP.")
-    parser.add_argument("--predictor-residual", action="store_true",
-                        help="Predictor outputs delta added to z instead of replacing it.")
+                        help="Number of TransformerEncoderLayer blocks in the predictor.")
+    parser.add_argument("--predictor-no-residual", action="store_true",
+                        help="Disable residual prediction. Default predicts Δz.")
     parser.add_argument("--counterfactual", action="store_true",
                         help="Train against all NUM_ACTIONS counterfactual next-states per "
-                             "starting state. Requires a buffer produced with --counterfactual.")
+                             "starting state. Requires a buffer produced with --counterfactual. "
+                             "Always single-step (no horizon).")
+    parser.add_argument("--encoder-residual-blocks", type=int, default=0,
+                        help="N residual blocks at each conv stage (default 0).")
+    parser.add_argument("--encoder-aux-channels", action="store_true",
+                        help="Prepend hand-engineered aux channels (heights, holes, bumpiness).")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -173,19 +184,23 @@ def main():
     if buf.size < args.batch_size:
         raise ValueError(f"buffer too small ({buf.size}) for batch_size ({args.batch_size})")
 
-    encoder = StateEncoder(latent_dim=args.latent_dim).to(device)
+    encoder = StateEncoder(
+        patch_dim=args.patch_dim,
+        residual_blocks=args.encoder_residual_blocks,
+        aux_channels=args.encoder_aux_channels,
+    ).to(device)
     target_encoder = copy.deepcopy(encoder).to(device)
     for p in target_encoder.parameters():
         p.requires_grad_(False)
     target_encoder.eval()
 
-    action_encoder = ActionEncoder().to(device)
+    action_encoder = ActionEncoder(embed_dim=args.patch_dim).to(device)
     predictor = Predictor(
-        latent_dim=args.latent_dim,
-        action_emb_dim=action_encoder.embed_dim,
-        hidden=args.predictor_hidden,
+        patch_dim=args.patch_dim,
+        num_patches=encoder.num_patches,
+        num_heads=args.predictor_heads,
         depth=args.predictor_depth,
-        residual=args.predictor_residual,
+        residual=not args.predictor_no_residual,
     ).to(device)
 
     params = (
@@ -200,88 +215,150 @@ def main():
     logger = JsonlLogger(log_path)
     (log_path.parent / "train_args.json").write_text(json.dumps(vars(args), indent=2))
 
+    H = args.horizon_h
+    state_shape = buf.state_shape
+
     pbar = tqdm(range(args.steps), desc="train")
     for step in pbar:
         log_now = (step % args.log_every == 0)
-        z_pred_first = None
-        z_target_first = None
         if args.counterfactual:
-            k = max(1, args.rollout_k)
-            batch = buf.sample_rollout(args.batch_size, k, rng=rng)
-            s0 = torch.from_numpy(batch["s0"]).to(device)
-            next_states_k = torch.from_numpy(batch["next_states_k"]).to(device)
-            actions_executed = torch.from_numpy(batch["actions_executed"]).to(device)
+            mse_tf_val = None
+            mse_ar_val = None
+            if args.ar_weight > 0:
+                # CF + AR: need actions_executed and the chained next-states.
+                batch = buf.sample_rollout(args.batch_size, H, rng=rng)
+                s0 = torch.from_numpy(batch["s0"]).to(device)
+                actions_executed = torch.from_numpy(batch["actions_executed"]).to(device)
+                next_states_k = torch.from_numpy(batch["next_states_k"]).to(device)  # (B, K, A, *state)
+                # CF loss uses the t=0 counterfactual fan-out (B, A, *state).
+                next_states_t0 = next_states_k[:, 0]
+            else:
+                batch = buf.sample(args.batch_size, rng=rng)
+                s0 = torch.from_numpy(batch["s"]).to(device)
+                next_states_t0 = torch.from_numpy(batch["next_states"]).to(device)
+                actions_executed = None
+                next_states_k = None
 
             cf_out = counterfactual_step_loss(
                 s0=s0,
-                next_states_k=next_states_k,
-                actions_executed=actions_executed,
+                next_states=next_states_t0,
                 encoder=encoder,
                 target_encoder=target_encoder,
                 action_encoder=action_encoder,
                 predictor=predictor,
             )
-            mse = cf_out["mse"]
-            z_pred_all_last = cf_out["z_pred_all"]                     # (B, A, D)
-            z = encoder(s0)                                            # for VICReg + logging
+            mse_cf = cf_out["mse"]
+            mse_tf_val = mse_cf.item()
+            z_pred_all = cf_out["z_pred_all"]                  # (B, A, N, D)
+            z_for_vic = encoder(s0)                            # (B, N, D)
 
-            # For cos_sim logging pick action 0 (any fixed action works).
-            z_pred = z_pred_all_last[:, 0]
+            # For cos_sim logging, pick action 0.
+            z_pred_log = z_pred_all[:, 0]                      # (B, N, D)
             with torch.no_grad():
-                z_next_target = target_encoder(next_states_k[:, -1, 0])
-            if log_now:
-                z_pred_first = z_pred.detach()
-                z_target_first = z_next_target.detach()
-            # VICReg on the (online) encoder's output of s0 — prevents encoder
-            # collapse the same way as the single-action path. Applying it to
-            # the predicted latents instead lets the encoder drift unbounded
-            # because VICReg is the only thing constraining its scale.
-            var_loss = variance_loss(z, target_std=args.target_std)
-            cov_loss = covariance_loss(z)
-            loss = mse + args.var_weight * var_loss + args.cov_weight * cov_loss
-        elif args.rollout_k <= 1:
-            batch = buf.sample(args.batch_size, rng=rng)
-            s = torch.from_numpy(batch["s"]).to(device)
-            a = torch.from_numpy(batch["a"]).to(device)
-            s_next = torch.from_numpy(batch["s_next"]).to(device)
+                z_target_log = target_encoder(next_states_t0[:, 0])  # (B, N, D)
 
-            z = encoder(s)
-            a_emb = action_encoder(a)
-            z_pred = predictor(z, a_emb)
+            if args.ar_weight > 0:
+                # AR rollout along the *executed* action chain. Target at step t
+                # is the encoded next_states_k[b, t, actions_executed[b, t]].
+                B = s0.shape[0]
+                A_dim = next_states_k.shape[2]
+                # Gather targets: shape (B, K, *state)
+                idx_shape = (B, H, 1) + (1,) * len(state_shape)
+                expand_shape = (-1, -1, 1) + tuple(state_shape)
+                idx = actions_executed.view(*idx_shape).expand(*expand_shape)
+                target_states_chain = next_states_k.gather(2, idx).squeeze(2)
+                with torch.no_grad():
+                    z_target_chain_flat = target_encoder(
+                        target_states_chain.reshape(B * H, *state_shape)
+                    )
+                    _, N_p, D_p = z_target_chain_flat.shape
+                    z_target_chain = z_target_chain_flat.view(B, H, N_p, D_p)
 
-            with torch.no_grad():
-                z_next_target = target_encoder(s_next)
-            mse = F.mse_loss(z_pred, z_next_target)
-            if log_now:
-                z_pred_first = z_pred.detach()
-                z_target_first = z_next_target.detach()
-            var_loss = variance_loss(z, target_std=args.target_std)
-            cov_loss = covariance_loss(z)
+                # AR rollout from encoder(s0).
+                z = encoder(s0)                                # (B, N, D)
+                z_preds_ar = []
+                for t in range(H):
+                    a_emb_t = action_encoder(actions_executed[:, t])
+                    z = predictor(z, a_emb_t)
+                    z_preds_ar.append(z)
+                z_pred_ar = torch.stack(z_preds_ar, dim=1)     # (B, H, N, D)
+                mse_ar = F.mse_loss(z_pred_ar, z_target_chain)
+                mse_ar_val = mse_ar.item()
+                mse = mse_cf + args.ar_weight * mse_ar
+            else:
+                mse = mse_cf
+
+            var_loss = variance_loss(z_for_vic, target_std=args.target_std)
+            cov_loss = covariance_loss(z_for_vic)
             loss = mse + args.var_weight * var_loss + args.cov_weight * cov_loss
         else:
-            batch = buf.sample_rollout(args.batch_size, args.rollout_k, rng=rng)
-            s0 = torch.from_numpy(batch["s0"]).to(device)
-            actions = torch.from_numpy(batch["actions"]).to(device)  # (B, K)
-            s_next_k = torch.from_numpy(batch["s_next_k"]).to(device)  # (B, K, *)
+            batch = buf.sample_rollout(args.batch_size, H, rng=rng)
+            s0 = torch.from_numpy(batch["s0"]).to(device)              # (B, *state)
+            actions = torch.from_numpy(batch["actions"]).to(device)    # (B, H)
+            s_next_k = torch.from_numpy(batch["s_next_k"]).to(device)  # (B, H, *state)
+            B = s0.shape[0]
 
-            z = encoder(s0)  # (B, latent_dim)
-            mse_terms = []
-            z_pred = z
-            for t in range(args.rollout_k):
-                a_emb = action_encoder(actions[:, t])
-                z_pred = predictor(z_pred, a_emb)
-                with torch.no_grad():
-                    z_target_t = target_encoder(s_next_k[:, t])
-                mse_terms.append(F.mse_loss(z_pred, z_target_t))
-                if log_now and t == 0:
-                    z_pred_first = z_pred.detach()
-                    z_target_first = z_target_t.detach()
-            mse = torch.stack(mse_terms).mean()
+            # Stack (s0, s_next_k) into H+1 contiguous frames per row.
+            frames = torch.cat([s0.unsqueeze(1), s_next_k], dim=1)      # (B, H+1, *state)
+            frames_flat = frames.reshape(B * (H + 1), *state_shape)
+
+            # Encode all frames with the online encoder (used for VICReg and,
+            # in teacher-forced mode, as predictor inputs at every step).
+            z_all_flat = encoder(frames_flat)                           # (B*(H+1), N, D)
+            N, D = z_all_flat.shape[1], z_all_flat.shape[2]
+            z_all = z_all_flat.view(B, H + 1, N, D)
+
+            # Targets always come from the EMA target encoder at t = 1..H.
             with torch.no_grad():
-                z_next_target = z_target_t  # for cos_sim logging
-            var_loss = variance_loss(z, target_std=args.target_std)
-            cov_loss = covariance_loss(z)
+                z_target = target_encoder(frames[:, 1:].reshape(B * H, *state_shape))
+                z_target = z_target.view(B, H, N, D)
+
+            mse_tf_val = None
+            mse_ar_val = None
+            if args.autoregressive:
+                # AR: chain the predictor's own outputs forward for H steps.
+                z = z_all[:, 0]                                         # (B, N, D)
+                z_preds = []
+                for t in range(H):
+                    a_emb_t = action_encoder(actions[:, t])             # (B, D)
+                    z = predictor(z, a_emb_t)
+                    z_preds.append(z)
+                z_pred = torch.stack(z_preds, dim=1)                    # (B, H, N, D)
+                mse = F.mse_loss(z_pred, z_target)
+                mse_ar_val = mse.item()
+            else:
+                # Teacher-forced: predictor input at each step is the REAL
+                # encoded frame, not the previous prediction.
+                z_in = z_all[:, :H].reshape(B * H, N, D)
+                a_emb = action_encoder(actions.reshape(B * H))
+                z_pred = predictor(z_in, a_emb).view(B, H, N, D)
+                mse_tf = F.mse_loss(z_pred, z_target)
+                mse_tf_val = mse_tf.item()
+                if args.ar_weight > 0:
+                    # Mixed: also run an autoregressive rollout from z_all[:, 0]
+                    # and add its MSE term weighted by --ar-weight.
+                    z = z_all[:, 0]
+                    z_preds_ar = []
+                    for t in range(H):
+                        a_emb_t = action_encoder(actions[:, t])
+                        z = predictor(z, a_emb_t)
+                        z_preds_ar.append(z)
+                    z_pred_ar = torch.stack(z_preds_ar, dim=1)
+                    mse_ar = F.mse_loss(z_pred_ar, z_target)
+                    mse_ar_val = mse_ar.item()
+                    mse = mse_tf + args.ar_weight * mse_ar
+                else:
+                    mse = mse_tf
+            var_loss = variance_loss(z_all, target_std=args.target_std)
+            cov_loss = covariance_loss(z_all)
             loss = mse + args.var_weight * var_loss + args.cov_weight * cov_loss
+
+            # Per-step cos_sim logging (first/last step in the H window).
+            z_pred_log = z_pred[:, 0]
+            z_target_log = z_target[:, 0]
+            z_pred_last = z_pred[:, -1]
+            z_target_last = z_target[:, -1]
+            z_for_vic = z_all
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -289,24 +366,25 @@ def main():
         scheduler.step()
         ema_update(target_encoder, encoder, args.ema_tau)
 
-        if step % args.log_every == 0:
+        if log_now:
             with torch.no_grad():
-                z_std_mean = z.std(dim=0).mean().item()
-                cos_sim = F.cosine_similarity(z_pred, z_next_target, dim=-1).mean().item()
-                if z_pred_first is not None and z_target_first is not None:
-                    cos_sim_k1 = F.cosine_similarity(
-                        z_pred_first, z_target_first, dim=-1).mean().item()
+                z_flat = _flatten_for_stats(z_for_vic)
+                z_std_mean = z_flat.std(dim=0).mean().item()
+                cos_sim_k1 = F.cosine_similarity(z_pred_log, z_target_log, dim=-1).mean().item()
+                if args.counterfactual:
+                    cos_sim_kK = cos_sim_k1
                 else:
-                    cos_sim_k1 = cos_sim
-                # mean abs off-diagonal of cov(z) on encoder outputs
-                n_b, d_b = z.shape
-                z_centered = z - z.mean(dim=0, keepdim=True)
-                cov_z = (z_centered.T @ z_centered) / max(n_b - 1, 1)
-                abs_cov_z = cov_z.abs()
+                    cos_sim_kK = F.cosine_similarity(z_pred_last, z_target_last, dim=-1).mean().item()
+                cos_sim = (cos_sim_k1 + cos_sim_kK) / 2.0
+
+                z_centered = z_flat - z_flat.mean(dim=0, keepdim=True)
+                cov_z = (z_centered.T @ z_centered) / max(z_centered.shape[0] - 1, 1)
+                d_b = cov_z.shape[0]
                 n_off = d_b * d_b - d_b
                 if n_off > 0:
                     z_offdiag_cov = float(
-                        (abs_cov_z.sum() - abs_cov_z.diag().sum()).item() / n_off)
+                        (cov_z.abs().sum() - cov_z.abs().diag().sum()).item() / n_off
+                    )
                 else:
                     z_offdiag_cov = 0.0
             record = {
@@ -318,10 +396,15 @@ def main():
                 "z_std_mean": z_std_mean,
                 "cos_sim": cos_sim,
                 "cos_sim_k1": cos_sim_k1,
-                "cos_sim_kK": cos_sim,
+                "cos_sim_kK": cos_sim_kK,
                 "z_offdiag_cov": z_offdiag_cov,
                 "lr": scheduler.get_last_lr()[0],
             }
+            if mse_tf_val is not None:
+                key = "mse_cf" if args.counterfactual else "mse_tf"
+                record[key] = mse_tf_val
+            if mse_ar_val is not None:
+                record["mse_ar"] = mse_ar_val
             logger.log(record)
             pbar.set_postfix(loss=f"{loss.item():.4f}", z_std=f"{z_std_mean:.3f}")
 
@@ -346,6 +429,72 @@ def main():
         args=args,
     )
     print(f"saved final checkpoint to {args.out}")
+
+    # ---- post-training multistep rollout accuracy eval ----
+    if not args.counterfactual:
+        _ACTION_NAMES = ["LEFT", "RIGHT", "ROTATE", "DROP"]
+        _eval_horizons = [1, 2, 4, 8, 16]
+        _eval_n = 2000
+        _eval_rng = np.random.default_rng(args.seed)
+        _max_h = max(_eval_horizons)
+        _h_set = set(_eval_horizons)
+
+        _batch = buf.sample_rollout(_eval_n, k=_max_h, rng=_eval_rng)
+        _s0 = torch.from_numpy(_batch["s0"]).to(device)
+        _actions = torch.from_numpy(_batch["actions"]).to(device)
+        _s_next_k = torch.from_numpy(_batch["s_next_k"]).to(device)
+        _a0_np = _batch["actions"][:, 0]
+
+        _cos_list: list[float] = []
+        _mse_list: list[float] = []
+        _std_list: list[float] = []
+        _pa_cos_k1: dict[str, float] = {}
+        _pa_mse_k1: dict[str, float] = {}
+
+        encoder.eval()
+        action_encoder.eval()
+        predictor.eval()
+
+        with torch.no_grad():
+            _z_pred = encoder(_s0)
+            for _t in range(_max_h):
+                _k = _t + 1
+                _z_pred = predictor(_z_pred, action_encoder(_actions[:, _t]))
+                if _k not in _h_set:
+                    continue
+                _z_tgt = encoder(_s_next_k[:, _t])
+                _cos_per = F.cosine_similarity(_z_pred, _z_tgt, dim=-1)   # (B, N)
+                _mse_per = ((_z_pred - _z_tgt) ** 2).mean(dim=-1)          # (B, N)
+                _cos_list.append(_cos_per.mean().item())
+                _mse_list.append(_mse_per.mean().item())
+                _std_list.append(_z_pred.std(dim=0).mean().item())
+                if _k == 1:
+                    _cop = _cos_per.cpu().numpy()
+                    _mep = _mse_per.cpu().numpy()
+                    for _ai, _name in enumerate(_ACTION_NAMES):
+                        _idx = np.where(_a0_np == _ai)[0]
+                        _pa_cos_k1[_name] = float(_cop[_idx].mean()) if _idx.size > 0 else float("nan")
+                        _pa_mse_k1[_name] = float(_mep[_idx].mean()) if _idx.size > 0 else float("nan")
+
+        _eval_result = {
+            "horizons": _eval_horizons,
+            "cos_sim": _cos_list,
+            "mse": _mse_list,
+            "z_pred_std": _std_list,
+            "per_action_cos_sim_k1": _pa_cos_k1,
+            "per_action_mse_k1": _pa_mse_k1,
+            "n": _eval_n,
+            "buffer": args.buffer,
+            "jepa": args.out,
+        }
+        _eval_path = log_path.parent / "multistep_accuracy.json"
+        _eval_path.write_text(json.dumps(_eval_result, indent=2))
+
+        print(f"\n  k  | cos_sim  |    mse")
+        for _i, _k in enumerate(_eval_horizons):
+            print(f"  {_k:<3} | {_cos_list[_i]:.4f}  | {_mse_list[_i]:.4f}")
+        print(f"  DROP mse@1 = {_pa_mse_k1.get('DROP', float('nan')):.4f}")
+        print(f"saved multistep eval to {_eval_path}")
 
 
 if __name__ == "__main__":

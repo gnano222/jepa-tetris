@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from jepa_tetris.data.replay_buffer import ReplayBuffer
 from jepa_tetris.models.action_encoder import ActionEncoder
-from jepa_tetris.models.encoder import StateEncoder
+from jepa_tetris.models.encoder import make_encoder_from_args
 from jepa_tetris.models.predictor import Predictor
 from jepa_tetris.models.probe import Probe
 from jepa_tetris.utils.device import get_device
@@ -27,13 +27,14 @@ def r2_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 
 def offdiag_cov_mean_abs(z: torch.Tensor) -> float:
+    # Accept either (B, D) or (B, N, D); flatten patches to (B*N, D).
+    z = z.reshape(-1, z.shape[-1])
     n, d = z.shape
     if n < 2:
         return 0.0
     zc = z - z.mean(dim=0, keepdim=True)
     cov = (zc.T @ zc) / (n - 1)
     abs_cov = cov.abs()
-    # subtract diagonal to get off-diagonal sum
     off_sum = abs_cov.sum() - abs_cov.diag().sum()
     n_off = d * d - d
     if n_off <= 0:
@@ -63,21 +64,21 @@ def main():
 
     device = get_device()
     ckpt = torch.load(args.jepa, map_location=device, weights_only=False)
-    latent_dim = ckpt["args"]["latent_dim"]
+    patch_dim = ckpt["args"]["patch_dim"]
 
-    encoder = StateEncoder(latent_dim=latent_dim).to(device)
+    encoder = make_encoder_from_args(ckpt["args"], device=device)
     encoder.load_state_dict(ckpt["encoder"])
     encoder.eval()
-    action_encoder = ActionEncoder().to(device)
+    action_encoder = ActionEncoder(embed_dim=patch_dim).to(device)
     action_encoder.load_state_dict(ckpt["action_encoder"])
     action_encoder.eval()
-    pred_hidden = ckpt["args"].get("predictor_hidden", 256)
     pred_depth = ckpt["args"].get("predictor_depth", 2)
-    pred_residual = ckpt["args"].get("predictor_residual", False)
+    pred_heads = ckpt["args"].get("predictor_heads", 4)
+    pred_residual = not ckpt["args"].get("predictor_no_residual", False)
     predictor = Predictor(
-        latent_dim=latent_dim,
-        action_emb_dim=action_encoder.embed_dim,
-        hidden=pred_hidden,
+        patch_dim=patch_dim,
+        num_patches=encoder.num_patches,
+        num_heads=pred_heads,
         depth=pred_depth,
         residual=pred_residual,
     ).to(device)
@@ -90,7 +91,7 @@ def main():
         probe_ckpt = torch.load(args.probe, map_location=device, weights_only=False)
         probe_depth = probe_ckpt.get("probe_depth", 1)
         probe_hidden = probe_ckpt.get("probe_hidden", 64)
-        probe = Probe(latent_dim=latent_dim, num_targets=3,
+        probe = Probe(patch_dim=patch_dim, num_targets=3,
                       depth=probe_depth, hidden=probe_hidden).to(device)
         probe.load_state_dict(probe_ckpt["probe"])
         probe.eval()

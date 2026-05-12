@@ -104,28 +104,28 @@ def test_predict_all_actions_per_state_matches_per_pair_calls():
     """Regression test for the (state, action) batching alignment.
 
     Earlier the script paired states and actions with mismatched repeat
-    patterns, causing many (i, a) slots in the (N, A, D) tensor to actually
+    patterns, causing many (i, a) slots in the (N, A, F) tensor to actually
     hold predictions for the wrong action — silently yielding ~0 pairwise
     distances and a misleading "action collapse" diagnosis. Verify that the
     helper's batched output matches per-(state, action) calls one-by-one."""
     torch.manual_seed(0)
-    encoder = StateEncoder(latent_dim=32).eval()
-    action_encoder = ActionEncoder(num_actions=4, embed_dim=8).eval()
-    predictor = Predictor(latent_dim=32, action_emb_dim=8, hidden=64, depth=1).eval()
+    patch_dim = 32
+    encoder = StateEncoder(patch_dim=patch_dim).eval()
+    action_encoder = ActionEncoder(num_actions=4, embed_dim=patch_dim).eval()
+    predictor = Predictor(patch_dim=patch_dim, num_patches=encoder.num_patches, depth=1).eval()
     states = torch.randn(7, 2, 20, 10)
 
     with torch.no_grad():
         z_s, z_pred = predict_all_actions_per_state(
             states, encoder, action_encoder, predictor,
         )
-        # Manual reference: one (state, action) at a time.
+        # Manual reference: one (state, action) at a time, flattened across patches.
         for i in range(7):
             for a in range(4):
                 z_i = encoder(states[i:i + 1])
                 a_emb = action_encoder(torch.tensor([a]))
-                expected = predictor(z_i, a_emb).squeeze(0)
+                expected = predictor(z_i, a_emb).squeeze(0).flatten()
                 torch.testing.assert_close(z_pred[i, a], expected, rtol=1e-5, atol=1e-6)
-        # And different actions should give different outputs (sanity).
         for i in range(7):
             for a in range(4):
                 for b in range(a + 1, 4):

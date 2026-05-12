@@ -11,7 +11,7 @@ import torch
 
 from jepa_tetris.models.action_encoder import ActionEncoder
 from jepa_tetris.models.decoder import StateDecoder
-from jepa_tetris.models.encoder import StateEncoder
+from jepa_tetris.models.encoder import StateEncoder, make_encoder_from_args
 from jepa_tetris.models.predictor import Predictor
 
 
@@ -23,33 +23,34 @@ class JepaBundle:
     target_encoder: StateEncoder
     action_encoder: ActionEncoder
     predictor: Predictor
-    latent_dim: int
+    patch_dim: int
+    num_patches: int
     args: dict
 
 
 def load_jepa(path: str, device: torch.device) -> JepaBundle:
     ckpt = torch.load(path, map_location=device, weights_only=False)
     args = ckpt.get("args", {})
-    latent_dim = args.get("latent_dim", 64)
+    patch_dim = args["patch_dim"]
 
-    encoder = StateEncoder(latent_dim=latent_dim).to(device)
+    encoder = make_encoder_from_args(args, device=device)
     encoder.load_state_dict(ckpt["encoder"])
     encoder.eval()
 
-    target_encoder = StateEncoder(latent_dim=latent_dim).to(device)
+    target_encoder = make_encoder_from_args(args, device=device)
     target_encoder.load_state_dict(ckpt["target_encoder"])
     target_encoder.eval()
 
-    action_encoder = ActionEncoder().to(device)
+    action_encoder = ActionEncoder(embed_dim=patch_dim).to(device)
     action_encoder.load_state_dict(ckpt["action_encoder"])
     action_encoder.eval()
 
     predictor = Predictor(
-        latent_dim=latent_dim,
-        action_emb_dim=action_encoder.embed_dim,
-        hidden=args.get("predictor_hidden", 256),
+        patch_dim=patch_dim,
+        num_patches=encoder.num_patches,
+        num_heads=args.get("predictor_heads", 4),
         depth=args.get("predictor_depth", 2),
-        residual=args.get("predictor_residual", False),
+        residual=not args.get("predictor_no_residual", False),
     ).to(device)
     predictor.load_state_dict(ckpt["predictor"])
     predictor.eval()
@@ -63,19 +64,20 @@ def load_jepa(path: str, device: torch.device) -> JepaBundle:
         target_encoder=target_encoder,
         action_encoder=action_encoder,
         predictor=predictor,
-        latent_dim=latent_dim,
+        patch_dim=patch_dim,
+        num_patches=encoder.num_patches,
         args=args,
     )
 
 
-def load_decoder(path: str, latent_dim: int, device: torch.device) -> StateDecoder:
+def load_decoder(path: str, patch_dim: int, device: torch.device) -> StateDecoder:
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    ckpt_dim = ckpt.get("latent_dim", latent_dim)
-    if ckpt_dim != latent_dim:
+    ckpt_dim = ckpt.get("patch_dim", patch_dim)
+    if ckpt_dim != patch_dim:
         raise ValueError(
-            f"decoder latent_dim ({ckpt_dim}) != JEPA latent_dim ({latent_dim})"
+            f"decoder patch_dim ({ckpt_dim}) != JEPA patch_dim ({patch_dim})"
         )
-    decoder = StateDecoder(latent_dim=latent_dim).to(device)
+    decoder = StateDecoder(patch_dim=patch_dim).to(device)
     decoder.load_state_dict(ckpt["decoder"])
     decoder.eval()
     for p in decoder.parameters():

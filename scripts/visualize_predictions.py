@@ -153,7 +153,7 @@ def main():
     print(f"using device: {device}")
 
     bundle = load_jepa(args.checkpoint, device)
-    decoder = load_decoder(args.decoder, bundle.latent_dim, device)
+    decoder = load_decoder(args.decoder, bundle.patch_dim, device)
 
     env = TetrisEnv(seed=args.seed, max_steps=args.max_steps)
     rng = np.random.default_rng(args.seed)

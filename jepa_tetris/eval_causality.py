@@ -35,15 +35,17 @@ def predict_all_actions_per_state(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the predictor on every (state, action) pair in `states × {0..A-1}`.
 
+    Returns flat-latent forms (patch grid is folded into the final dim) so the
+    M1/M2/M4 metrics treat each latent as a single vector for distance work.
+
     Returns:
-        z_s:    (N, D) — encoder(states).
-        z_pred: (N, A, D) — predictor(z_s[i], action_encoder(a)) for each (i, a).
+        z_s:    (N, F)    where F = num_patches * patch_dim.
+        z_pred: (N, A, F) — predictor(z_s[i], action_encoder(a)) per (i, a),
+                            flattened across patches.
 
     Indexing convention: ``z_pred[i, a]`` is the prediction for state i under
     action a. The flat batch packs entries in row-major order: index k*A + a
-    holds (state k, action a). This is what callers reshape from when they
-    rebuild (N, A, D) — getting the alignment wrong silently produces 0
-    pairwise distances, so the helper exists to make it test-coverable.
+    holds (state k, action a).
     """
     n = states.shape[0]
     a = next(predictor.parameters())  # device anchor
@@ -51,12 +53,14 @@ def predict_all_actions_per_state(
     num_actions = action_encoder.embed.num_embeddings
     actions_all = torch.arange(num_actions, device=device).repeat(n)            # (N*A,)
     s_repeat = states.repeat_interleave(num_actions, dim=0)                     # (N*A, ...)
-    z_s = encoder(states)                                                       # (N, D)
-    z_repeat = encoder(s_repeat)                                                # (N*A, D)
-    a_emb = action_encoder(actions_all)                                         # (N*A, E)
-    z_pred_flat = predictor(z_repeat, a_emb)                                    # (N*A, D)
-    z_pred = z_pred_flat.view(n, num_actions, -1)                               # (N, A, D)
-    return z_s, z_pred
+    z_s = encoder(states)                                                       # (N, P, D)
+    z_repeat = encoder(s_repeat)                                                # (N*A, P, D)
+    a_emb = action_encoder(actions_all)                                         # (N*A, D)
+    z_pred_grid = predictor(z_repeat, a_emb)                                    # (N*A, P, D)
+    z_s_flat = z_s.flatten(1)                                                   # (N, P*D)
+    z_pred_flat = z_pred_grid.flatten(1)                                        # (N*A, P*D)
+    z_pred = z_pred_flat.view(n, num_actions, -1)                               # (N, A, P*D)
+    return z_s_flat, z_pred
 
 
 @dataclass

@@ -45,11 +45,11 @@ def test_train_decoder_loop_reduces_both_losses():
     buf = _build_tiny_buffer(n_episodes=4, seed=0)
     assert buf.size >= 32, f"tiny buffer too small to train: {buf.size}"
 
-    latent_dim = 32
-    encoder = StateEncoder(latent_dim=latent_dim).to(device).eval()
-    action_encoder = ActionEncoder().to(device).eval()
-    predictor = Predictor(latent_dim=latent_dim, action_emb_dim=action_encoder.embed_dim).to(device).eval()
-    decoder = StateDecoder(latent_dim=latent_dim).to(device)
+    patch_dim = 32
+    encoder = StateEncoder(patch_dim=patch_dim).to(device).eval()
+    action_encoder = ActionEncoder(embed_dim=patch_dim).to(device).eval()
+    predictor = Predictor(patch_dim=patch_dim, num_patches=encoder.num_patches).to(device).eval()
+    decoder = StateDecoder(patch_dim=patch_dim).to(device)
 
     for m in (encoder, action_encoder, predictor):
         for p in m.parameters():

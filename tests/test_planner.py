@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 
 from jepa_tetris.env.tetris import NUM_ACTIONS, TetrisEnv
 from jepa_tetris.models.action_encoder import ActionEncoder
@@ -9,11 +8,14 @@ from jepa_tetris.models.probe import Probe
 from jepa_tetris.plan import BFSPlanner, PlacementPlanner, RealDynamicsPlanner
 
 
+PATCH_DIM = 64
+
+
 def _make_planner(depth=2):
-    encoder = StateEncoder(latent_dim=64)
-    action_encoder = ActionEncoder()
-    predictor = Predictor(latent_dim=64, action_emb_dim=action_encoder.embed_dim)
-    probe = Probe(latent_dim=64, num_targets=3)
+    encoder = StateEncoder(patch_dim=PATCH_DIM)
+    action_encoder = ActionEncoder(embed_dim=PATCH_DIM)
+    predictor = Predictor(patch_dim=PATCH_DIM, num_patches=encoder.num_patches)
+    probe = Probe(patch_dim=PATCH_DIM, num_targets=3)
     return BFSPlanner(encoder, action_encoder, predictor, probe, depth=depth, device="cpu")
 
 
@@ -31,7 +33,6 @@ def test_planner_handles_depth_4():
     obs = env.reset()
     a = planner.select_action(obs)
     assert 0 <= a < NUM_ACTIONS
-    # depth=4, branching=4 => 256 raw, 175 after filtering to require_drop=True
     assert planner.sequences.shape == (175, 4)
 
 
@@ -46,35 +47,33 @@ def test_planner_runs_episode_to_completion():
 
 
 def test_real_dynamics_planner_runs():
-    encoder = StateEncoder(latent_dim=64)
-    probe = Probe(latent_dim=64, num_targets=3)
+    encoder = StateEncoder(patch_dim=PATCH_DIM)
+    probe = Probe(patch_dim=PATCH_DIM, num_targets=3)
     env = TetrisEnv(seed=0, max_steps=10)
     env.reset()
     planner = RealDynamicsPlanner(encoder, probe, env, depth=2, device="cpu")
     obs = env.observe()
     a = planner.select_action(obs)
     assert 0 <= a < NUM_ACTIONS
-    # Env state should be unchanged after planning
     assert env.steps == 0
 
 
 def test_placement_planner_runs():
-    encoder = StateEncoder(latent_dim=64)
-    probe = Probe(latent_dim=64, num_targets=3)
+    encoder = StateEncoder(patch_dim=PATCH_DIM)
+    probe = Probe(patch_dim=PATCH_DIM, num_targets=3)
     env = TetrisEnv(seed=0, max_steps=20)
     env.reset()
     planner = PlacementPlanner(encoder, probe, env, device="cpu")
     obs = env.observe()
     plan = planner.select_plan(obs)
     assert len(plan) > 0
-    # Last action should always be DROP
     from jepa_tetris.env.tetris import DROP
     assert plan[-1] == DROP
 
 
 def test_placement_planner_does_not_mutate_env():
-    encoder = StateEncoder(latent_dim=64)
-    probe = Probe(latent_dim=64, num_targets=3)
+    encoder = StateEncoder(patch_dim=PATCH_DIM)
+    probe = Probe(patch_dim=PATCH_DIM, num_targets=3)
     env = TetrisEnv(seed=0, max_steps=20)
     env.reset()
     board_before = env.board.copy()

@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from jepa_tetris.data.replay_buffer import ReplayBuffer
-from jepa_tetris.models.encoder import StateEncoder
+from jepa_tetris.models.encoder import make_encoder_from_args
 from jepa_tetris.models.probe import Probe
 from jepa_tetris.utils.device import get_device
 
@@ -113,15 +113,15 @@ def main():
         device = get_device()
         print(f"\nloading models on {device}")
         ckpt = torch.load(args.jepa, map_location=device, weights_only=False)
-        latent_dim = ckpt["args"]["latent_dim"]
-        encoder = StateEncoder(latent_dim=latent_dim).to(device)
+        patch_dim = ckpt["args"]["patch_dim"]
+        encoder = make_encoder_from_args(ckpt["args"], device=device)
         encoder.load_state_dict(ckpt["encoder"])
         encoder.eval()
 
         probe_ckpt = torch.load(args.probe, map_location=device, weights_only=False)
         probe_depth = probe_ckpt.get("probe_depth", 1)
         probe_hidden = probe_ckpt.get("probe_hidden", 64)
-        probe = Probe(latent_dim=latent_dim, num_targets=3,
+        probe = Probe(patch_dim=patch_dim, num_targets=3,
                       depth=probe_depth, hidden=probe_hidden).to(device)
         probe.load_state_dict(probe_ckpt["probe"])
         probe.eval()

@@ -83,9 +83,9 @@ class BFSPlanner:
     def select_plan(self, obs: np.ndarray) -> list[int]:
         """Return the full best action sequence (length == depth)."""
         obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
-        z = self.encoder(obs_t)
+        z = self.encoder(obs_t)                                  # (1, N, D)
         n = self.sequences.shape[0]
-        z = z.expand(n, -1).contiguous()
+        z = z.expand(n, -1, -1).contiguous()                     # (n, N, D)
         for t in range(self.depth):
             a_idx = self.sequences[:, t]
             a_emb = self.action_embs[a_idx]

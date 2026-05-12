@@ -34,7 +34,7 @@ from jepa_tetris.eval_causality import (
     predict_all_actions_per_state,
 )
 from jepa_tetris.models.action_encoder import ActionEncoder
-from jepa_tetris.models.encoder import StateEncoder
+from jepa_tetris.models.encoder import make_encoder_from_args
 from jepa_tetris.models.predictor import Predictor
 from jepa_tetris.utils.device import get_device
 
@@ -86,26 +86,26 @@ def main():
     print(f"using device: {device}")
 
     ckpt = torch.load(args.jepa, map_location=device, weights_only=False)
-    latent_dim = ckpt["args"]["latent_dim"]
-    pred_hidden = ckpt["args"].get("predictor_hidden", 256)
+    patch_dim = ckpt["args"]["patch_dim"]
     pred_depth = ckpt["args"].get("predictor_depth", 2)
-    pred_residual = ckpt["args"].get("predictor_residual", False)
+    pred_heads = ckpt["args"].get("predictor_heads", 4)
+    pred_residual = not ckpt["args"].get("predictor_no_residual", False)
 
     encoder_state = (
         ckpt["encoder"] if args.use_online_encoder else ckpt["target_encoder"]
     )
-    encoder = StateEncoder(latent_dim=latent_dim).to(device)
+    encoder = make_encoder_from_args(ckpt["args"], device=device)
     encoder.load_state_dict(encoder_state)
     encoder.eval()
 
-    action_encoder = ActionEncoder().to(device)
+    action_encoder = ActionEncoder(embed_dim=patch_dim).to(device)
     action_encoder.load_state_dict(ckpt["action_encoder"])
     action_encoder.eval()
 
     predictor = Predictor(
-        latent_dim=latent_dim,
-        action_emb_dim=action_encoder.embed_dim,
-        hidden=pred_hidden,
+        patch_dim=patch_dim,
+        num_patches=encoder.num_patches,
+        num_heads=pred_heads,
         depth=pred_depth,
         residual=pred_residual,
     ).to(device)
@@ -128,9 +128,9 @@ def main():
     with torch.no_grad():
         z_s_full, z_pred = predict_all_actions_per_state(
             s_t, encoder, action_encoder, predictor,
-        )                                                                 # (N,D), (N,A,D)
+        )                                                                 # (N,F), (N,A,F)
         z_target_full = encoder(s_primes_t.reshape(n * A, *s_t.shape[1:]))
-        z_target = z_target_full.view(n, A, latent_dim)
+        z_target = z_target_full.flatten(1).view(n, A, -1)                # (N, A, F)
 
     m1 = m1_action_retrieval(z_pred, z_target)
     m2 = m2_calibration_correlation(z_pred, z_target)

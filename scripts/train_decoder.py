@@ -21,6 +21,13 @@ This script trains the decoder on a mix of both distributions:
 
 We log `bce_enc` and `bce_pred` separately so it's easy to see whether the
 predictor-distribution loss is actually decreasing.
+
+Buffer compatibility: works with both `ReplayBuffer` (single-action triplets)
+and `CounterfactualReplayBuffer` (4-action fanout per row) via the adapters
+in `jepa_tetris.data.buffer_adapters`. CF rows are presented as on-policy
+(s, a_executed, s_next=next_states[a_executed]) transitions; the off-policy
+counterfactual branches are not needed by the decoder — they only matter for
+the predictor's contrastive loss in `train.py --counterfactual`.
 """
 from __future__ import annotations
 
@@ -33,7 +40,11 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from tqdm import tqdm
 
-from jepa_tetris.data.replay_buffer import ReplayBuffer
+from jepa_tetris.data.buffer_adapters import (
+    load_buffer,
+    sample_normalized,
+    sample_rollout_normalized,
+)
 from jepa_tetris.models.decoder import StateDecoder
 from jepa_tetris.utils.checkpoint import load_jepa
 from jepa_tetris.utils.device import get_device
@@ -44,7 +55,9 @@ from jepa_tetris.utils.seed import set_seed
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--jepa", required=True, help="path to JEPA checkpoint")
-    parser.add_argument("--buffer", required=True, help="replay buffer .npz")
+    parser.add_argument("--buffer", required=True,
+                        help="Replay buffer .npz (single-action or counterfactual; "
+                             "type auto-detected by schema).")
     parser.add_argument("--out", default="checkpoints/decoder.pt")
     parser.add_argument("--steps", type=int, default=5_000)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -83,8 +96,8 @@ def main():
     device = get_device()
     print(f"using device: {device}")
 
-    buf = ReplayBuffer.load(args.buffer)
-    print(f"loaded {buf.size} triplets")
+    buf = load_buffer(args.buffer)
+    print(f"loaded {buf.size} rows ({type(buf).__name__})")
     if buf.size < args.batch_size:
         raise ValueError(f"buffer too small ({buf.size}) for batch_size ({args.batch_size})")
 
@@ -92,9 +105,9 @@ def main():
     encoder = bundle.encoder
     action_encoder = bundle.action_encoder
     predictor = bundle.predictor
-    latent_dim = bundle.latent_dim
+    patch_dim = bundle.patch_dim
 
-    decoder = StateDecoder(latent_dim=latent_dim).to(device)
+    decoder = StateDecoder(patch_dim=patch_dim).to(device)
     optimizer = AdamW(decoder.parameters(), lr=args.lr)
     rng = np.random.default_rng(args.seed)
     logger = JsonlLogger(args.log_file)
@@ -119,7 +132,7 @@ def main():
 
         # ----- encoder-distribution branch -----------------------------------
         if n_enc > 0:
-            batch = buf.sample(n_enc, rng=rng)
+            batch = sample_normalized(buf, n_enc, rng=rng)
             if args.source == "s":
                 s_np = batch["s"]
             elif args.source == "s_next":
@@ -143,7 +156,7 @@ def main():
 
         # ----- predictor-distribution branch ---------------------------------
         if n_pred > 0:
-            roll_batch = buf.sample_rollout(n_pred, k=args.rollout_k, rng=rng)
+            roll_batch = sample_rollout_normalized(buf, n_pred, k=args.rollout_k, rng=rng)
             depth = int(rng.integers(1, args.rollout_k + 1))  # uniform in [1, K]
             s0 = torch.from_numpy(roll_batch["s0"]).to(device)
             actions = torch.from_numpy(roll_batch["actions"][:, :depth]).to(device)
@@ -188,7 +201,7 @@ def main():
     torch.save(
         {
             "decoder": decoder.state_dict(),
-            "latent_dim": latent_dim,
+            "patch_dim": patch_dim,
             "predictor_mix": args.predictor_mix,
             "rollout_k": args.rollout_k,
         },

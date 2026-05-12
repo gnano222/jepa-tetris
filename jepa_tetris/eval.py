@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from jepa_tetris.env.tetris import DROP, NUM_ACTIONS, TetrisEnv
 from jepa_tetris.models.action_encoder import ActionEncoder
-from jepa_tetris.models.encoder import StateEncoder
+from jepa_tetris.models.encoder import make_encoder_from_args
 from jepa_tetris.models.predictor import Predictor
 from jepa_tetris.models.probe import Probe
 from jepa_tetris.plan import BFSPlanner, PlacementPlanner, RealDynamicsPlanner
@@ -81,22 +81,31 @@ def main():
     print(f"using device: {device}")
 
     ckpt = torch.load(args.jepa, map_location=device, weights_only=False)
-    latent_dim = ckpt["args"]["latent_dim"]
+    patch_dim = ckpt["args"]["patch_dim"]
 
-    encoder = StateEncoder(latent_dim=latent_dim).to(device)
+    encoder = make_encoder_from_args(ckpt["args"], device=device)
     encoder.load_state_dict(ckpt["encoder"])
     encoder.eval()
-    action_encoder = ActionEncoder().to(device)
+    action_encoder = ActionEncoder(embed_dim=patch_dim).to(device)
     action_encoder.load_state_dict(ckpt["action_encoder"])
     action_encoder.eval()
-    predictor = Predictor(latent_dim=latent_dim, action_emb_dim=action_encoder.embed_dim).to(device)
+    pred_depth = ckpt["args"].get("predictor_depth", 2)
+    pred_heads = ckpt["args"].get("predictor_heads", 4)
+    pred_residual = not ckpt["args"].get("predictor_no_residual", False)
+    predictor = Predictor(
+        patch_dim=patch_dim,
+        num_patches=encoder.num_patches,
+        num_heads=pred_heads,
+        depth=pred_depth,
+        residual=pred_residual,
+    ).to(device)
     predictor.load_state_dict(ckpt["predictor"])
     predictor.eval()
 
     probe_ckpt = torch.load(args.probe, map_location=device, weights_only=False)
     probe_depth = probe_ckpt.get("probe_depth", 1)
     probe_hidden = probe_ckpt.get("probe_hidden", 64)
-    probe = Probe(latent_dim=latent_dim, num_targets=3,
+    probe = Probe(patch_dim=patch_dim, num_targets=3,
                   depth=probe_depth, hidden=probe_hidden).to(device)
     probe.load_state_dict(probe_ckpt["probe"])
     probe.eval()

@@ -1,8 +1,9 @@
-"""Post-hoc decoder probe: latent z -> board logits (B, 2, 20, 10).
+"""Post-hoc decoder probe: (B, N, D) patches -> board logits (B, 2, 20, 10).
 
-Mirrors the encoder in encoder.py with ConvTranspose2d. Trained with frozen
-JEPA weights (see scripts/train_decoder.py); used only for visualization, never
-to influence representation learning.
+Mirrors the encoder with ConvTranspose2d. Reshapes the patch grid back to a
+spatial feature map and upsamples 3x. Trained with frozen JEPA weights (see
+scripts/train_decoder.py); used only for visualization, never to influence
+representation learning.
 """
 from __future__ import annotations
 
@@ -11,22 +12,35 @@ import torch.nn as nn
 
 
 class StateDecoder(nn.Module):
-    def __init__(self, latent_dim: int = 64):
+    def __init__(
+        self,
+        patch_dim: int = 128,
+        out_h: int = 3,
+        out_w: int = 2,
+    ):
         super().__init__()
-        self.latent_dim = latent_dim
-        self.head = nn.Linear(latent_dim, 128 * 3 * 2)
+        self.patch_dim = patch_dim
+        self.out_h = out_h
+        self.out_w = out_w
+        c1 = patch_dim // 2
+        c2 = patch_dim // 4
         # Spatial chain: (3, 2) -> (5, 3) -> (10, 5) -> (20, 10).
-        # output_padding tuned per layer to match encoder's downsampling.
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=0),
-            nn.GroupNorm(8, 64),
+            nn.ConvTranspose2d(patch_dim, c1, kernel_size=3, stride=2, padding=1, output_padding=0),
+            nn.GroupNorm(8, c1),
             nn.GELU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=(1, 0)),
-            nn.GroupNorm(8, 32),
+            nn.ConvTranspose2d(c1, c2, kernel_size=3, stride=2, padding=1, output_padding=(1, 0)),
+            nn.GroupNorm(8, c2),
             nn.GELU(),
-            nn.ConvTranspose2d(32, 2, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)),
+            nn.ConvTranspose2d(c2, 2, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)),
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.head(z).view(-1, 128, 3, 2)
+        """(B, N, D) -> (B, 2, 20, 10)."""
+        B, N, D = z.shape
+        if N != self.out_h * self.out_w:
+            raise ValueError(
+                f"Decoder expects N = out_h * out_w = {self.out_h * self.out_w}, got N={N}"
+            )
+        h = z.transpose(1, 2).reshape(B, D, self.out_h, self.out_w)
         return self.deconv(h)

@@ -68,7 +68,7 @@ st.set_page_config(page_title="JEPA Tetris decoder", layout="wide")
 def _load_models(jepa_path: str, decoder_path: str, device_str: str):
     device = torch.device(device_str)
     bundle = load_jepa(jepa_path, device)
-    decoder = load_decoder(decoder_path, bundle.latent_dim, device)
+    decoder = load_decoder(decoder_path, bundle.patch_dim, device)
     return bundle, decoder, device
 
 
@@ -142,9 +142,9 @@ def _binary_acc(prob: np.ndarray, truth: np.ndarray) -> float:
 # =============================================================================
 
 st.sidebar.header("Checkpoints")
-default_jepa = "checkpoints/jepa.pt"
-default_dec = "checkpoints/decoder.pt"
-default_buf = "data/buffer.npz"
+default_jepa = "checkpoints/jepa_cf.pt"
+default_dec = "checkpoints/decoder_cf.pt"
+default_buf = "data/cf_buffer.npz"
 
 jepa_path = st.sidebar.text_input("JEPA checkpoint", default_jepa)
 decoder_path = st.sidebar.text_input("Decoder checkpoint", default_dec)
@@ -310,8 +310,8 @@ def _mode_buffer():
 
     # ----------------------------- rollout -----------------------------------
     st.markdown("---")
-    st.markdown("**K-step rollout from this state**")
-    horizon = st.slider("Horizon K", 1, 16, value=4)
+    st.markdown("**Autoregressive rollout from this state**")
+    horizon = st.slider("Horizon H", 1, 16, value=4)
     action_mode = st.radio(
         "Actions",
         options=["Use buffer's actual actions", "Pick per step"],
@@ -501,4 +501,4 @@ else:
     _mode_latent()
 
 st.sidebar.markdown("---")
-st.sidebar.caption(f"device: `{device}`  ·  latent_dim: {bundle.latent_dim}")
+st.sidebar.caption(f"device: `{device}`  ·  patch_dim: {bundle.patch_dim}  ·  N: {bundle.num_patches}")

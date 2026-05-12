@@ -11,7 +11,7 @@ from torch.optim import AdamW
 from tqdm import tqdm
 
 from jepa_tetris.data.replay_buffer import ReplayBuffer
-from jepa_tetris.models.encoder import StateEncoder
+from jepa_tetris.models.encoder import make_encoder_from_args
 from jepa_tetris.models.probe import Probe
 from jepa_tetris.utils.device import get_device
 from jepa_tetris.utils.seed import set_seed
@@ -42,15 +42,15 @@ def main():
     print(f"loaded {buf.size} triplets")
 
     ckpt = torch.load(args.jepa, map_location=device, weights_only=False)
-    latent_dim = ckpt["args"]["latent_dim"]
+    patch_dim = ckpt["args"]["patch_dim"]
 
-    encoder = StateEncoder(latent_dim=latent_dim).to(device)
+    encoder = make_encoder_from_args(ckpt["args"], device=device)
     encoder.load_state_dict(ckpt["encoder"])
     encoder.eval()
     for p in encoder.parameters():
         p.requires_grad_(False)
 
-    probe = Probe(latent_dim=latent_dim, num_targets=3,
+    probe = Probe(patch_dim=patch_dim, num_targets=3,
                   depth=args.probe_depth, hidden=args.probe_hidden).to(device)
     optimizer = AdamW(probe.parameters(), lr=args.lr)
 
@@ -105,7 +105,7 @@ def main():
     torch.save(
         {
             "probe": probe.state_dict(),
-            "latent_dim": latent_dim,
+            "patch_dim": patch_dim,
             "target_mean": target_mean_np,
             "target_std": target_std_np,
             "probe_depth": args.probe_depth,

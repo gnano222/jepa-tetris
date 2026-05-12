@@ -1,14 +1,20 @@
-# JEPA Tetris — V1 POC
+# JEPA Tetris
 
 A Joint-Embedding Predictive Architecture (JEPA) world model for simplified
-Tetris. The encoder + predictor + probe + planner pipeline learns from random
-play and clears lines in a hand-coded planner — beating random ≥ 28× over
-50 episodes, ≥ 59× over 100 episodes.
+Tetris. Patch-token latents, transformer predictor, teacher-forced multi-step
+training — architectural choices follow [DINO-WM](https://arxiv.org/abs/2411.04983).
+Trains from offline play; clears lines via a planner that scores predicted
+states.
 
 See [BUILD_PLAN.md](BUILD_PLAN.md) for the V1 spec and [the implementation
 plan](.claude/) for design decisions.
 
 ## Headline results
+
+> **Note.** These numbers are from the V1 architecture (flat 64-d latent, MLP
+> predictor, autoregressive K=4 rollout training). The V2 patch-token /
+> transformer / teacher-forced model has not yet been retrained — V1
+> checkpoints do not load on V2 code.
 
 100-episode evaluation, simplified Tetris (20×10 board, all 7 tetrominoes,
 hard-drop semantics, max_steps=500):
@@ -29,26 +35,34 @@ multi-step rollout training.
 ## Architecture
 
 ```
-state ──► Encoder f_θ ──► z_t ─┐
-                                ▼
-                         Predictor g_φ ──► ẑ_{t+1}
-action ──► Action emb ──► a_t ─┘            │
-                                            ▼
-                              compare with z_{t+1}
-                              from EMA target encoder f_ξ (stop-gradient)
+state ──► Encoder f_θ ──► z_t (B, N=6, D=128) ─┐
+                                                ▼
+                                       Predictor g_φ (ViT) ──► ẑ_{t+1}
+action ──► Action token a_t (B, D) ────────────┘                │
+                                                                 ▼
+                                         compare with z_{t+1}
+                                         from EMA target encoder f_ξ (stop-gradient)
 ```
 
-Components:
-- **State encoder** (CNN): (B, 2, 20, 10) → (B, 64) latent, 2 channels for
-  occupancy + falling piece.
-- **Target encoder** (EMA copy of state encoder, τ=0.99, no gradients).
-- **Action encoder**: `nn.Embedding(4, 16)`.
-- **Predictor** (3-layer MLP, 256 hidden): single-step latent transition.
-- **Probe head** (2-layer MLP): `z → (lines_cleared, holes, aggregate_height)`,
-  trained on normalized targets.
+Components (closer to DINO-WM):
+- **State encoder** (CNN): (B, 2, 20, 10) → (B, 6, 128) patch-token grid.
+  Three stride-2 convs downsample to 3×2; each spatial cell becomes a patch
+  token of dim 128. No flatten or final Linear — the spatial structure is the
+  latent.
+- **Target encoder** (EMA copy, τ=0.99, no gradients).
+- **Action encoder**: `nn.Embedding(4, 128)`. The action becomes one extra
+  token in the predictor's sequence.
+- **Predictor** (2× TransformerEncoderLayer): self-attention over 6 patch
+  tokens + 1 action token, outputs the next 6 patch tokens. Default residual
+  (predicts Δz).
+- **Probe head**: learnable query attends over the 6 patches → pooled vector
+  → MLP → (lines_cleared, holes, aggregate_height), normalized targets.
 
-VICReg-style variance + covariance regularizers prevent collapse
-(`mean(std(z))` stays around 1.0–1.1 throughout training).
+Trained with **teacher-forced multi-step prediction**: each batch is an H+1
+frame window; the encoder is applied to all frames, the predictor is run
+independently at each of H positions from the *real* encoded frame (no
+autoregressive chain). VICReg-style variance + covariance regularizers
+prevent collapse (`mean(std(z))` stays around 1.0–1.1).
 
 ## Setup
 
@@ -78,12 +92,12 @@ python -m jepa_tetris.data.collect \
     --policy mixed --epsilon 0.4 --prime-prob 0.4 \
     --out data/buffer.npz --seed 0
 
-# 3. train JEPA with 4-step rollout loss (50k steps, ~6 min on M-series MPS)
-#    Artifacts (train_log.jsonl, train_args.json) land in results/<timestamp>_k4/
+# 3. train JEPA with teacher-forced H=4 prediction (50k steps, ~6 min on M-series MPS)
+#    Artifacts (train_log.jsonl, train_args.json) land in results/<timestamp>_h4/
 python -m jepa_tetris.train \
     --buffer data/buffer.npz --steps 50000 \
-    --rollout-k 4 \
-    --out checkpoints/jepa.pt --run k4 --seed 0
+    --horizon-h 4 \
+    --out checkpoints/jepa.pt --run h4 --seed 0
 
 # 4. plot training curves (point at the run folder created in step 3)
 python scripts/plot_loss.py \
@@ -181,9 +195,10 @@ UMAP fits; both are cached for the rest of the session.
   rows already filled except for one column, so random play occasionally
   completes lines. Combined with mixed exploration, this lifts line-clear
   density further.
-- **Multi-step rollout training.** The predictor is trained on K=4 step
-  rollouts (`--rollout-k 4`) to maintain accuracy across the planning
-  horizon. This drops 4-step prediction error from cos_sim 0.977 to 0.989.
+- **Teacher-forced multi-step training.** The predictor is trained on H+1
+  frame windows (`--horizon-h 4`); the encoder runs over all frames once and
+  the predictor is invoked independently at each of H positions from the
+  *real* encoded frame (no autoregressive chain). Matches the DINO-WM recipe.
 - **Normalized probe targets.** Lines (mean 0.007), holes (mean 10), and
   height (mean 47) have wildly different scales. Normalizing all three
   to zero mean / unit variance during training prevents holes/height from
@@ -225,13 +240,11 @@ the JEPA probe to score them. With ~60% of the heuristic's performance
 (0.59 vs ~1.28 lines/ep), it demonstrates that the learned features capture
 board-quality information well enough for planning.
 
-## V2 directions
+## Future directions
 
-- **Train probe inside the JEPA loop**, on rolled-out latents at multiple
-  horizons, so its training distribution matches its inference distribution.
-- **Larger predictor or residual predictor**, predicting `delta_z` instead
-  of full `z_next`. The Predictor class supports `residual=True`; not yet
-  trained with it.
+- **Retrain V2** — patch tokens + transformer predictor + teacher-forced
+  multi-step. V1 checkpoints don't load. Verify that the planner numbers
+  hold or improve (V1's 33–59× random target).
 - **Stronger data collection** — for example, distillation from the
   heuristic policy with light noise (epsilon=0.1) would yield much higher
   line-clear density.
