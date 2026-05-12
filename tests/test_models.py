@@ -154,6 +154,26 @@ def test_encoder_predictor_compat_aggressive_variant():
     assert torch.isfinite(loss)
 
 
+def test_encoder_15patch_stride_stages_2():
+    """stride_stages=2 yields 15 patches (5x3) instead of 6 (3x2)."""
+    enc = StateEncoder(patch_dim=128, stride_stages=2)
+    x = torch.randn(4, 2, 20, 10)
+    z = enc(x)
+    assert z.shape == (4, 15, 128), f"expected (4, 15, 128), got {z.shape}"
+    assert enc.num_patches == 15
+
+    pred = Predictor(patch_dim=128, num_patches=enc.num_patches)
+    a = torch.randn(4, 128)
+    out = pred(z, a)
+    assert out.shape == (4, 15, 128)
+
+
+def test_make_encoder_from_args_stride_stages_2():
+    args = {"patch_dim": 128, "encoder_stride_stages": 2}
+    enc = make_encoder_from_args(args)
+    assert enc(torch.randn(2, 2, 20, 10)).shape == (2, 15, 128)
+
+
 def test_make_encoder_from_args_default():
     args = {"patch_dim": 128}
     enc = make_encoder_from_args(args)

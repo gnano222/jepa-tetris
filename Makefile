@@ -3,13 +3,13 @@
 #
 # Prerequisites: pip install runpod && cp .env.runpod.example .env.runpod && fill in values
 
-GPU    ?= NVIDIA RTX 4090
+GPU    ?= NVIDIA RTX 4500
 STEPS  ?= 50000
 .PHONY: help train train-a100 train-h100 stop delete status upload-data get-checkpoints get-results ssh logs
 
 help:
 	@echo "RunPod targets:"
-	@echo "  make train              Start RTX 4090 training pod (default GPU)"
+	@echo "  make train              Start RTX 4500 training pod (default GPU)"
 	@echo "  make train GPU=...      Start pod with specific GPU type"
 	@echo "  make train-a100         Start A100 SXM training pod"
 	@echo "  make train-h100         Start H100 SXM training pod"
@@ -43,27 +43,32 @@ delete:
 status:
 	python scripts/runpod_pod.py status
 
-# POD_SSH is intentionally unquoted — it expands to multiple shell words
-# (e.g. "root@1.2.3.4 -p 22222 -i ~/.ssh/id_rsa"), not a single path.
-# Upload data files to the network volume via a cheap CPU pod.
-# Requires: POD_SSH set to the SSH connection string shown in RunPod UI
-# Example: make upload-data POD_SSH="root@<ip> -p <port> -i ~/.ssh/id_rsa"
+# POD_SSH = "user@host [ssh-options]"
+# Use the DIRECT TCP connection from RunPod Connect tab (not the ssh.runpod.io proxy).
+# Example: POD_SSH="root@174.x.x.x -p 22022 -i ~/.ssh/id_ed25519"
+# For rsync: host = $(firstword $(POD_SSH)), ssh_opts = $(wordlist 2,$(words $(POD_SSH)),$(POD_SSH))
 upload-data:
-	@[ -n "$(POD_SSH)" ] || (echo "Set POD_SSH='root@<ip> -p <port> -i ~/.ssh/id_rsa'" && exit 1)
-	rsync -avz --progress data/ $(POD_SSH):/workspace/data/
+	@[ -n "$(POD_SSH)" ] || (echo "Set POD_SSH='root@IP -p PORT -i ~/.ssh/id_ed25519' (use direct TCP from RunPod Connect tab)" && exit 1)
+	rsync -avz --progress \
+	  -e "ssh $(wordlist 2,$(words $(POD_SSH)),$(POD_SSH))" \
+	  data/ $(firstword $(POD_SSH)):/workspace/data/
 
 get-checkpoints:
-	@[ -n "$(POD_SSH)" ] || (echo "Set POD_SSH='root@<ip> -p <port> -i ~/.ssh/id_rsa'" && exit 1)
-	rsync -avz --progress $(POD_SSH):/workspace/checkpoints/ ./checkpoints/
+	@[ -n "$(POD_SSH)" ] || (echo "Set POD_SSH='root@IP -p PORT -i ~/.ssh/id_ed25519' (use direct TCP from RunPod Connect tab)" && exit 1)
+	rsync -avz --progress \
+	  -e "ssh $(wordlist 2,$(words $(POD_SSH)),$(POD_SSH))" \
+	  $(firstword $(POD_SSH)):/workspace/checkpoints/ ./checkpoints/
 
 get-results:
-	@[ -n "$(POD_SSH)" ] || (echo "Set POD_SSH='root@<ip> -p <port> -i ~/.ssh/id_rsa'" && exit 1)
-	rsync -avz --progress $(POD_SSH):/workspace/results/ ./results/
+	@[ -n "$(POD_SSH)" ] || (echo "Set POD_SSH='root@IP -p PORT -i ~/.ssh/id_ed25519' (use direct TCP from RunPod Connect tab)" && exit 1)
+	rsync -avz --progress \
+	  -e "ssh $(wordlist 2,$(words $(POD_SSH)),$(POD_SSH))" \
+	  $(firstword $(POD_SSH)):/workspace/results/ ./results/
 
 ssh:
-	@[ -n "$(POD_SSH)" ] || (echo "Set POD_SSH='root@<ip> -p <port> -i ~/.ssh/id_rsa'" && exit 1)
+	@[ -n "$(POD_SSH)" ] || (echo "Set POD_SSH='user@ssh.runpod.io -i ~/.ssh/id_ed25519'" && exit 1)
 	ssh $(POD_SSH)
 
 logs:
-	@[ -n "$(POD_SSH)" ] || (echo "Set POD_SSH='root@<ip> -p <port> -i ~/.ssh/id_rsa'" && exit 1)
+	@[ -n "$(POD_SSH)" ] || (echo "Set POD_SSH='user@ssh.runpod.io -i ~/.ssh/id_ed25519'" && exit 1)
 	ssh $(POD_SSH) "tail -f /workspace/startup.log"

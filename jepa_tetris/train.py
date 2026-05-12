@@ -163,6 +163,9 @@ def main():
                         help="N residual blocks at each conv stage (default 0).")
     parser.add_argument("--encoder-aux-channels", action="store_true",
                         help="Prepend hand-engineered aux channels (heights, holes, bumpiness).")
+    parser.add_argument("--encoder-stride-stages", type=int, default=3, choices=[2, 3],
+                        help="Stride-2 downsampling stages: 3 (default) = 6 patches, "
+                             "2 = 15 patches (finer spatial resolution).")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -188,6 +191,7 @@ def main():
         patch_dim=args.patch_dim,
         residual_blocks=args.encoder_residual_blocks,
         aux_channels=args.encoder_aux_channels,
+        stride_stages=args.encoder_stride_stages,
     ).to(device)
     target_encoder = copy.deepcopy(encoder).to(device)
     for p in target_encoder.parameters():

@@ -1,8 +1,11 @@
 """CNN state encoder: (B, 2, 20, 10) -> (B, N, D) patch-token grid.
 
-The conv stack downsamples 3x with stride 2, ending in (B, D, H', W'); each
-spatial cell of the final feature map becomes a patch token. For the default
-20x10 board, this is N = H' * W' = 3 * 2 = 6 tokens of dim D.
+The conv stack downsamples with stride-2 convs, ending in (B, D, H', W'); each
+spatial cell of the final feature map becomes a patch token.
+
+stride_stages controls spatial resolution:
+  3 (default): 20x10 -> 10x5 -> 5x3 -> 3x2  → N=6  patches  (V2 baseline)
+  2:           20x10 -> 10x5 -> 5x3           → N=15 patches  (finer granularity)
 
 Flags:
 - aux_channels: prepend hand-engineered features (column heights, holes mask,
@@ -71,8 +74,8 @@ def _spatial_after_strides(h: int, w: int, strides: list[tuple[int, int]]) -> tu
 class StateEncoder(nn.Module):
     """Produces a (B, N, D) patch-token grid from a (B, 2, H, W) board.
 
-    Conv channels scale with `patch_dim`: [patch_dim//4, patch_dim//2, patch_dim].
-    Three stride-2 convs downsample 20x10 -> 3x2, yielding N=6 patches.
+    stride_stages=3 (default): channels [D//4, D//2, D], 20x10 -> 3x2, N=6 patches.
+    stride_stages=2:           channels [D//2, D],       20x10 -> 5x3, N=15 patches.
     """
 
     def __init__(
@@ -82,21 +85,27 @@ class StateEncoder(nn.Module):
         aux_channels: bool = False,
         board_h: int = 20,
         board_w: int = 10,
+        stride_stages: int = 3,
     ):
         super().__init__()
         if patch_dim % 32 != 0:
             raise ValueError(
-                f"patch_dim must be divisible by 32 for GroupNorm(groups=8) on "
-                f"the first conv stage (patch_dim//4 channels). got {patch_dim}."
+                f"patch_dim must be divisible by 32 for GroupNorm(groups=8). got {patch_dim}."
             )
+        if stride_stages not in (2, 3):
+            raise ValueError(f"stride_stages must be 2 or 3, got {stride_stages}")
         self.patch_dim = patch_dim
+        self.stride_stages = stride_stages
         self.use_aux_channels = aux_channels
         self.board_h = board_h
         self.board_w = board_w
 
         in_channels = 2 + (3 if aux_channels else 0)
-        strides = [(2, 2), (2, 2), (2, 2)]
-        channels = [patch_dim // 4, patch_dim // 2, patch_dim]
+        strides = [(2, 2)] * stride_stages
+        if stride_stages == 2:
+            channels = [patch_dim // 2, patch_dim]
+        else:
+            channels = [patch_dim // 4, patch_dim // 2, patch_dim]
 
         prev_c = in_channels
         stages: list[nn.Module] = []
@@ -131,6 +140,7 @@ def make_encoder_from_args(args: dict, device=None) -> StateEncoder:
         patch_dim=args["patch_dim"],
         residual_blocks=args.get("encoder_residual_blocks", 0),
         aux_channels=args.get("encoder_aux_channels", False),
+        stride_stages=args.get("encoder_stride_stages", 3),
     )
     if device is not None:
         enc = enc.to(device)

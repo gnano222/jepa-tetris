@@ -7,20 +7,16 @@ One-time setup (~15 min). After setup, training is `make train` + `make get-chec
 - RunPod account at runpod.io (add $20 credit to start)
 - Docker installed locally (for building the image)
 - Docker Hub account (free tier is fine)
-- SSH key added to RunPod: Settings → SSH Keys → Add
+- SSH key added to RunPod account: runpod.io → Settings → SSH Public Keys → Add
 
 ## Step 1: Install tools
 
 ```bash
-# RunPod CLI
-brew install runpod/runpodctl/runpodctl   # macOS
-
-# RunPod Python SDK
+# RunPod Python SDK (used by Makefile scripts locally)
 pip install runpod
-
-# Configure CLI with your API key (from runpod.io → Settings → API Keys)
-runpodctl config --apiKey=YOUR_API_KEY
 ```
+
+> **Note:** `runpodctl` is only needed *inside* pods (for auto-stop) — it comes pre-installed there. You do not need to install or configure it locally.
 
 ## Step 2: Build and push Docker image
 
@@ -47,12 +43,13 @@ Spin up a cheap CPU pod with the volume to upload data:
 
 1. In RunPod → Pods → + Deploy → search "Ubuntu" → pick cheapest CPU pod
 2. Attach the volume at `/workspace`
-3. Deploy, then get the SSH connection string from Connect tab
+3. Deploy, then get the SSH over exposed TCP connection string from Connect tab
 4. Run locally:
 
 ```bash
-POD_SSH="root@<ip> -p <port> -i ~/.ssh/id_rsa" make upload-data
+POD_SSH="root@213.173.105.99 -p 49059 -i ~/.ssh/id_ed25519" make upload-data
 ```
+
 
 5. Stop and delete the CPU pod (you just used it as a file upload gateway).
 
