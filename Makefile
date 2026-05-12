@@ -5,6 +5,7 @@
 
 GPU    ?= NVIDIA RTX 4500
 STEPS  ?= 50000
+BRANCH ?= main
 .PHONY: help train train-a100 train-h100 stop delete status upload-data get-checkpoints get-results ssh logs
 
 help:
@@ -26,13 +27,13 @@ help:
 	@echo "Set steps:     make train STEPS=200000"
 
 train:
-	JEPA_STEPS=$(STEPS) python scripts/runpod_pod.py create --gpu "$(GPU)"
+	JEPA_STEPS=$(STEPS) python scripts/runpod_pod.py create --gpu "$(GPU)" --branch "$(BRANCH)"
 
 train-a100:
-	JEPA_STEPS=$(STEPS) python scripts/runpod_pod.py create --gpu "NVIDIA A100 80GB SXM"
+	JEPA_STEPS=$(STEPS) python scripts/runpod_pod.py create --gpu "NVIDIA A100 80GB SXM" --branch "$(BRANCH)"
 
 train-h100:
-	JEPA_STEPS=$(STEPS) python scripts/runpod_pod.py create --gpu "NVIDIA H100 80GB HBM3"
+	JEPA_STEPS=$(STEPS) python scripts/runpod_pod.py create --gpu "NVIDIA H100 80GB HBM3" --branch "$(BRANCH)"
 
 stop:
 	python scripts/runpod_pod.py stop

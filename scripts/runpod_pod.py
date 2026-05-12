@@ -36,23 +36,39 @@ def cmd_create(args):
     github_repo   = get_required("GITHUB_REPO")
 
     gpu_type = args.gpu or "NVIDIA RTX 4090"
+    branch   = args.branch or os.environ.get("JEPA_BRANCH", "main")
 
+    # Bootstrap: always pull the branch-specific code BEFORE running pod_startup.sh.
+    # This avoids the stale-cache problem where the network volume's cached
+    # pod_startup.sh lags behind the branch being trained.
     startup_cmd = (
-        "bash -c 'bash /workspace/jepa-tetris/scripts/pod_startup.sh 2>&1 "
-        "| tee /workspace/startup.log'"
+        "bash -c 'set -euo pipefail; "
+        "REPO_DIR=/workspace/jepa-tetris; "
+        "if [ -d $REPO_DIR/.git ]; then "
+        "  git -C $REPO_DIR fetch origin && "
+        "  git -C $REPO_DIR checkout ${JEPA_BRANCH:-main} && "
+        "  git -C $REPO_DIR pull --ff-only origin ${JEPA_BRANCH:-main}; "
+        "else "
+        "  git clone --branch ${JEPA_BRANCH:-main} $GITHUB_REPO $REPO_DIR; "
+        "fi && "
+        "exec bash $REPO_DIR/scripts/pod_startup.sh' 2>&1 | tee /workspace/startup.log"
     )
 
     env_vars = {
-        "GITHUB_REPO":   github_repo,
-        "JEPA_BUFFER":   os.environ.get("JEPA_BUFFER",  "data/buffer.npz"),
-        "JEPA_STEPS":    os.environ.get("JEPA_STEPS",   "50000"),
-        "JEPA_HORIZON":  os.environ.get("JEPA_HORIZON", "4"),
-        "JEPA_RUN":      os.environ.get("JEPA_RUN",     "pod_run"),
-        "JEPA_OUT":      os.environ.get("JEPA_OUT",     "checkpoints/jepa.pt"),
+        "GITHUB_REPO":    github_repo,
+        "JEPA_BRANCH":    branch,
+        "JEPA_BUFFER":    os.environ.get("JEPA_BUFFER",     "data/buffer.npz"),
+        "JEPA_STEPS":     os.environ.get("JEPA_STEPS",      "50000"),
+        "JEPA_HORIZON":   os.environ.get("JEPA_HORIZON",    "4"),
+        "JEPA_RUN":       os.environ.get("JEPA_RUN",        branch),
+        "JEPA_OUT":       os.environ.get("JEPA_OUT",        f"checkpoints/jepa-{branch}.pt"),
+        "JEPA_EXTRA_ARGS": os.environ.get("JEPA_EXTRA_ARGS", ""),
     }
 
+    pod_name = f"jepa-{branch[:20]}"
+
     pod = runpod.create_pod(
-        name="jepa-train",
+        name=pod_name,
         image_name=image,
         gpu_type_id=gpu_type,
         cloud_type="SECURE",
@@ -67,8 +83,9 @@ def cmd_create(args):
     pod_id = pod["id"]
     with open(_POD_ID_FILE, "w") as f:
         f.write(pod_id)
-    print(f"Pod created: {pod_id}")
-    print(f"GPU: {gpu_type} | Image: {image}")
+    print(f"Pod created: {pod_id}  ({pod_name})")
+    print(f"Branch: {branch} | GPU: {gpu_type} | Image: {image}")
+    print(f"Checkpoint: checkpoints/jepa-{branch}.pt")
     print("Startup log: /workspace/startup.log")
 
 
@@ -116,6 +133,7 @@ if __name__ == "__main__":
     sub = parser.add_subparsers(dest="cmd")
     p_create = sub.add_parser("create")
     p_create.add_argument("--gpu", default=None, help="GPU type ID (default: NVIDIA RTX 4090)")
+    p_create.add_argument("--branch", default=None, help="Git branch to run (default: main)")
     sub.add_parser("stop")
     sub.add_parser("delete")
     sub.add_parser("status")

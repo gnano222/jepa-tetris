@@ -78,12 +78,52 @@ make train-a100 STEPS=200000
 
 # Watch what's happening
 make status
-make logs POD_SSH="root@<ip> -p <port> -i ~/.ssh/id_rsa"
+make logs POD_SSH="root@<ip> -p <port> -i ~/.ssh/id_ed25519"
 
 # After training completes (pod auto-stops), pull results
-make get-checkpoints POD_SSH="..."
+make get-checkpoints POD_SSH="root@<ip> -p <port> -i ~/.ssh/id_ed25519"
 make get-results POD_SSH="..."
 ```
+
+> **SSH connection string:** use the **direct TCP** format from RunPod Connect tab (not the `ssh.runpod.io` proxy). It looks like `root@174.x.x.x -p 22022`.
+
+## Running parallel experiments
+
+Each experiment lives on its own git branch. Push the branch, then launch a pod pointing at it. Multiple pods can run different branches simultaneously.
+
+```bash
+# 1. Create a branch for your experiment
+git checkout -b exp-attention-pooling
+# ... make your code changes ...
+git add -p && git commit -m "try attention pooling in predictor"
+git push origin exp-attention-pooling
+
+# 2. Launch a pod on that branch (runs alongside any other running pods)
+make train BRANCH=exp-attention-pooling STEPS=100000
+
+# 3. Launch a second experiment on a different branch at the same time
+make train BRANCH=exp-wider-predictor STEPS=100000
+```
+
+Each pod is named after its branch (`jepa-exp-attention-pooling`) so `make status` shows clearly what's running:
+
+```
+abc123  jepa-exp-attention-pooling   RUNNING
+def456  jepa-exp-wider-predictor     RUNNING
+```
+
+Checkpoints land in separate files by branch — `checkpoints/jepa-exp-attention-pooling.pt` and `checkpoints/jepa-exp-wider-predictor.pt` — so they don't overwrite each other.
+
+```bash
+# Pull results for a specific experiment
+make get-checkpoints POD_SSH="root@<ip> -p <port> -i ~/.ssh/id_ed25519"
+
+# Compare runs locally
+python -m jepa_tetris.eval --jepa checkpoints/jepa-exp-attention-pooling.pt ...
+python -m jepa_tetris.eval --jepa checkpoints/jepa-exp-wider-predictor.pt ...
+```
+
+> **Stopping parallel pods:** `make stop` only tracks the most recently launched pod. To stop others, use the RunPod dashboard → Pods → Stop, or `make status` to get pod IDs then stop via the dashboard.
 
 ## GPU options and cost
 
