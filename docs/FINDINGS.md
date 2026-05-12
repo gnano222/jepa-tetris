@@ -428,3 +428,56 @@ JEPA predictors. Under compute parity on a fixed buffer, the standard
 single-action objective overfits monotonically while the counterfactual
 objective improves and saturates — flipping the sign of the comparison
 between 1× and 3× compute and widening it through 5×.*
+
+---
+
+# Experiment Log
+
+## Exp-1 — Per-patch action conditioning vs. extra-token (2026-05-12)
+
+**Question.** Does broadcasting the action embedding to every patch token
+(`z = z + a_emb.unsqueeze(1)`) improve prediction accuracy compared to
+appending the action as an extra (N+1)-th token in the transformer
+sequence?
+
+**Setup.** Two runs at equal sample budget (~12.8M samples):
+
+| arm | steps | batch | architecture |
+|---|---|---|---|
+| Standard (extra-token) | 50 000 | 256 | action appended as 16th token, pos_emb (1,16,128) |
+| Per-patch (broadcast) | 6 250 | 2 048 | action added to all 15 patch tokens, pos_emb (1,15,128) |
+
+Both use the 15-patch encoder (`encoder_stride_stages=2`, N=15),
+`patch_dim=128`, `horizon_h=4`, `ar_weight=0.25`. Evaluated with
+`scripts/multistep_accuracy.py` on the held-out buffer.
+
+**Results.**
+
+| metric | Standard (extra-token) | Per-patch (broadcast) |
+|---|---|---|
+| k=1 cos_sim | **0.992** | 0.966 |
+| k=4 cos_sim | **0.969** | 0.893 |
+| k=1 MSE | **0.037** | 0.069 |
+| k=4 MSE | **0.159** | 0.238 |
+| z_std | **0.868** | 0.603 |
+| offdiag_cov | **0.015** | 0.087 |
+| DROP k=1 cos_sim | **0.961** | 0.894 |
+
+**Conclusion.** Per-patch broadcast conditioning is a regression on every
+metric. The `offdiag_cov` jump from 0.015 → 0.087 is the sharpest signal:
+the latent is more entangled. The `z_std` drop to 0.60 indicates partial
+collapse that the VICReg regularizer didn't prevent.
+
+**Why the extra-token approach wins.** Broadcasting the same action embedding
+additively to all patches removes the transformer's ability to route action
+influence spatially — every patch receives an identical perturbation and
+must sort out the spatial structure on its own. The extra-token approach lets
+self-attention decide how much each patch should attend to the action token,
+effectively learning a per-patch *action relevance weight* from data. For a
+DROP action (which locks the falling piece), the relevant patches are where
+the piece lands, not the entire board.
+
+**Next.** If stronger action conditioning is wanted, FiLM (per-block
+`γ, β` produced from the action embedding) or dedicated cross-attention
+from the action to patch tokens are the right upgrades — not broadcast
+addition. See Predictor §2 in the roadmap.

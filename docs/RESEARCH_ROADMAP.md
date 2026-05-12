@@ -103,16 +103,16 @@ was removed in the V2 simplification — bring it back if width matters.
 V2 is a 2-layer transformer with `residual=True` by default (predicts Δz).
 Open directions:
 
-### Per-patch action conditioning ⬅ NEXT UP (2 of 2)
-Today the action is one extra token in the sequence (alongside the 6 patches).
-DINO-WM adds the action embedding to *every* patch token via broadcast addition
-(`z = z + a_emb.unsqueeze(1)`), so every patch simultaneously "sees" the action
-rather than attending to a separate token. This may improve DROP accuracy in
-particular, since the piece lock affects multiple patches at once.
+### ~~Per-patch action conditioning~~ ❌ TESTED — REGRESSION (2026-05-12)
+Broadcast addition (`z = z + a_emb.unsqueeze(1)`) tested against the extra-token
+baseline at equal sample budget (~12.8M samples, 15-patch encoder). Regressed on
+every metric: cos@1 0.966 vs 0.992, cos@4 0.893 vs 0.969, offdiag_cov 0.087 vs
+0.015, z_std 0.603 vs 0.868. The extra-token approach wins because self-attention
+can learn per-patch action relevance weights; broadcast gives every patch the same
+perturbation and removes that spatial routing.
 
-One-line change in `predictor.py` forward (remove action token from sequence,
-add to all patch tokens instead). Rerun with same training recipe and compare
-DROP MSE@1 and cos@1/4 against the 15-patch baseline.
+**If stronger action conditioning is needed**, skip broadcast and go directly to
+FiLM or cross-attention (see §2 below). See [FINDINGS.md — Exp-1](FINDINGS.md).
 
 ### Stronger action conditioning: FiLM / cross-attention
 Per-patch broadcast addition is the lightest form of "action everywhere." If
@@ -214,19 +214,22 @@ for generalization. Generalizes as a pattern: when a rare event dominates
 the dynamics, oversample it in the buffer rather than reweight in the
 loss.
 
-## Current benchmark — V2-Mixed-50k
+## Current benchmark — 15patch-100k
 
 All future experiments must beat these numbers to represent progress.
 
-| metric | value |
-|---|---|
-| cos@1 | 0.992 |
-| cos@4 | 0.968 |
-| cos@8 | 0.729 |
-| cos@16 | 0.013 |
-| DROP MSE@1 | 0.153 |
+| metric | 15patch-100k | V2-Mixed-50k (old) |
+|---|---|---|
+| cos@1 | **0.994** | 0.992 |
+| cos@4 | **0.976** | 0.968 |
+| cos@8 | — | 0.729 |
+| cos@16 | — | 0.013 |
+| DROP cos@1 | **0.970** | — |
+| DROP MSE@1 | 0.168 | 0.153 |
 
-Training recipe: 50k steps, `--ar-weight 0.25` (teacher-forced + AR mixed loss), mixed exploration buffer (5k episodes, ε=0.4). The k>4 collapse is architectural — H=4 training horizon is a hard ceiling at inference.
+15patch-100k: 15-patch encoder (`encoder_stride_stages=2`, N=15), 100k steps, batch 256, `ar_weight=0.25`, teacher-forced H=4. Checkpoint: `checkpoints/jepa_step95000.pt`.
+
+Note: DROP MSE@1 is higher on the 15-patch model (0.168 vs 0.153) despite better cos metrics — the larger latent space (15×128 vs 6×128) may need more steps to converge on the rare DROP transitions. The k>4 collapse persists (architectural — H=4 training horizon is a hard ceiling at inference).
 
 ## Suggested ordering
 
@@ -234,22 +237,20 @@ Roughly increasing surgery, all encoder/predictor focused.
 
 1. ~~**Retrain V2**~~ ✅ DONE — patch tokens + transformer + teacher-forced
    multi-step trained. V2-Mixed-50k is the current best baseline.
-2. **15-patch encoder** (Encoder §1) — drop one stride-2 conv, retrain with
-   mixed loss. Measure DROP MSE@1 and cos@1/4. Primary encoder improvement.
-3. **Per-patch action conditioning** (Predictor §1) — broadcast action
-   embedding to all patch tokens. One-line predictor change; stack on top
-   of 15-patch result or test independently.
-   - **3a. Multi-step stability tricks** (Predictor §3) — random K /
-     curriculum K / stop-grad on early steps. Cheap and folds into the same
-     retrain; the bigger the payoff, the longer the horizon you care about.
-   - **3b. FiLM or cross-attention conditioning** (Predictor §2) — only if
-     per-patch broadcast leaves DROP headroom. Bigger change than 3a but
-     unlocks richer action spaces later.
-   - **3c. Cosine loss A/B** (Predictor §4) — orthogonal one-flag experiment;
-     run alongside 3 or 3b on the same checkpoint.
-4. **Heuristic distillation** (Data) — higher line-clear density in the
-   buffer. Improves predictor signal on the most state-changing transition
-   class; useful any time DROP MSE plateaus.
-5. **Structured action encoder** (Action encoder §1) — only when actually
-   moving to a non-Tetris domain. Listed here so the predictor interface
-   stays opaque to action structure from now on.
+2. ~~**15-patch encoder**~~ ✅ DONE — two stride-2 stages → N=15 patches.
+   15patch-100k is the current best baseline (cos@1 0.994, cos@4 0.976).
+3. ~~**Per-patch action conditioning**~~ ❌ REGRESSION — broadcast addition
+   worse than extra-token on every metric. See [FINDINGS.md — Exp-1](FINDINGS.md).
+4. **FiLM or cross-attention action conditioning** (Predictor §2) — the right
+   next step for stronger action routing. FiLM produces per-block `(γ, β)` from
+   the action; cross-attention lets patch tokens attend to the action as KV.
+   Either generalises to structured action spaces without changing the predictor
+   interface. Evaluate via DROP MSE@1 on the 15-patch baseline.
+   - **4a. Multi-step stability tricks** (Predictor §3) — random K /
+     curriculum K / stop-grad on early steps. Folds into the same retrain.
+   - **4b. Cosine loss A/B** (Predictor §4) — orthogonal one-flag experiment.
+5. **Heuristic distillation** (Data) — higher line-clear density in the
+   buffer. DROP MSE@1 is the main bottleneck; the model barely sees line-clear
+   transitions in the current mixed-exploration buffer (~0.5% density).
+6. **Structured action encoder** (Action encoder §1) — only when moving to a
+   non-Tetris domain. Predictor interface already treats `a_emb` as opaque.
