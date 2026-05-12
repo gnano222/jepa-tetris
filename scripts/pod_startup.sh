@@ -9,6 +9,15 @@ REPO_DIR="/workspace/jepa-tetris"
 BRANCH="${JEPA_BRANCH:-main}"
 
 echo "==> Branch: $BRANCH"
+
+# Start SSH daemon so results can be pulled via rsync at any point during training.
+if [ -n "${PUBLIC_KEY:-}" ]; then
+  mkdir -p ~/.ssh
+  echo "$PUBLIC_KEY" >> ~/.ssh/authorized_keys
+  chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
+fi
+service ssh start || true
+
 pip install -q -e "$REPO_DIR/"
 
 # Ensure target dirs exist on volume
