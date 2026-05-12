@@ -123,7 +123,7 @@ def main():
     parser.add_argument("--buffer", required=True)
     parser.add_argument("--out", default="checkpoints/jepa.pt")
     parser.add_argument("--steps", type=int, default=50_000)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--patch-dim", type=int, default=128,
                         help="Per-patch channel dim D (= encoder's final conv channels).")

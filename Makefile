@@ -3,7 +3,7 @@
 #
 # Prerequisites: pip install runpod && cp .env.runpod.example .env.runpod && fill in values
 
-GPU    ?= NVIDIA GeForce RTX 4090
+GPU    ?= NVIDIA RTX A4500
 STEPS  ?= 50000
 BRANCH ?= main
 .PHONY: help train train-a100 train-h100 stop delete status upload-data get-checkpoints get-results ssh logs
