@@ -6,15 +6,19 @@ import sys
 
 import runpod
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_POD_ID_FILE = os.path.join(_REPO_ROOT, ".pod_id")
+
 
 def load_env():
     env_file = os.path.join(os.path.dirname(__file__), "..", ".env.runpod")
     if os.path.exists(env_file):
-        for line in open(env_file):
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
 
 
 def get_required(key):
@@ -61,11 +65,11 @@ def cmd_create(args):
         ports="22/tcp",
     )
     pod_id = pod["id"]
-    with open(".pod_id", "w") as f:
+    with open(_POD_ID_FILE, "w") as f:
         f.write(pod_id)
     print(f"Pod created: {pod_id}")
     print(f"GPU: {gpu_type} | Image: {image}")
-    print(f"Startup log: /workspace/startup.log")
+    print("Startup log: /workspace/startup.log")
 
 
 def cmd_stop(args):
@@ -85,7 +89,7 @@ def cmd_delete(args):
         print("Aborted.")
         return
     runpod.terminate_pod(pod_id)
-    os.remove(".pod_id")
+    os.remove(_POD_ID_FILE)
     print(f"Pod {pod_id} deleted.")
 
 
@@ -101,9 +105,10 @@ def cmd_status(args):
 
 
 def _read_pod_id():
-    if not os.path.exists(".pod_id"):
+    if not os.path.exists(_POD_ID_FILE):
         sys.exit("No .pod_id file found. Run `make train` first.")
-    return open(".pod_id").read().strip()
+    with open(_POD_ID_FILE) as f:
+        return f.read().strip()
 
 
 if __name__ == "__main__":
