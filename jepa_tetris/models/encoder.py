@@ -148,7 +148,9 @@ class StateEncoder(nn.Module):
         h = self.conv(x)                                              # (B, D, H', W')
         fine = h.flatten(2).transpose(1, 2).contiguous()             # (B, N_fine, D)
         if self.two_scale:
-            coarse = self.coarse_pool(h)                              # (B, D, 3, 2)
+            # AdaptiveAvgPool2d with non-integer ratios (5->3, 3->2) is unsupported on MPS.
+            h_pool = h.cpu() if h.device.type == "mps" else h
+            coarse = self.coarse_pool(h_pool).to(h.device)            # (B, D, 3, 2)
             coarse = coarse.flatten(2).transpose(1, 2).contiguous()  # (B, 6, D)
             return torch.cat([fine, coarse], dim=1)                   # (B, 21, D)
         return fine
