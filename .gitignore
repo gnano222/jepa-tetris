@@ -10,3 +10,5 @@ checkpoints/
 results/
 .DS_Store
 *.npz
+.env.runpod
+.pod_id
