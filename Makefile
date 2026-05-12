@@ -6,7 +6,7 @@
 GPU    ?= NVIDIA RTX A4500
 STEPS  ?= 50000
 BRANCH ?= main
-.PHONY: help train train-a100 train-h100 stop delete status upload-data get-checkpoints get-results ssh logs
+.PHONY: help train train-a100 train-h100 stop delete status download upload-data get-checkpoints get-results ssh logs
 
 help:
 	@echo "RunPod targets:"
@@ -17,6 +17,7 @@ help:
 	@echo "  make stop               Stop the current pod (preserves /workspace)"
 	@echo "  make delete             Permanently delete the current pod"
 	@echo "  make status             List all pods and their state"
+	@echo "  make download           Spin up CPU pod, rsync checkpoints+results, terminate"
 	@echo "  make upload-data        Upload local data/*.npz to network volume"
 	@echo "  make get-checkpoints    Download checkpoints from pod to local ./checkpoints/"
 	@echo "  make get-results        Download results/ from pod to local ./results/"
@@ -43,6 +44,9 @@ delete:
 
 status:
 	python scripts/runpod_pod.py status
+
+download:
+	python scripts/runpod_pod.py download
 
 # POD_SSH = "user@host [ssh-options]"
 # Use the DIRECT TCP connection from RunPod Connect tab (not the ssh.runpod.io proxy).

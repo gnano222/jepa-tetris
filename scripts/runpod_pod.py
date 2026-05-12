@@ -2,7 +2,9 @@
 """RunPod pod lifecycle management for jepa-tetris training."""
 import argparse
 import os
+import subprocess
 import sys
+import time
 
 import runpod
 
@@ -111,6 +113,87 @@ def cmd_delete(args):
     print(f"Pod {pod_id} deleted.")
 
 
+def cmd_download(args):
+    """Spin up a cheap CPU pod, rsync results+checkpoints locally, then terminate it."""
+    load_env()
+    runpod.api_key = get_required("RUNPOD_API_KEY")
+    volume_id = get_required("RUNPOD_VOLUME_ID")
+    ssh_key   = os.path.expanduser(os.environ.get("SSH_KEY", "~/.ssh/id_ed25519"))
+    pubkey    = open(ssh_key + ".pub").read().strip()
+
+    print("Spinning up CPU pod to access network volume...")
+    # cpu3c-2-4: 2 vCPU, 4 GB RAM — cheapest option, only needs to run rsync
+    for instance_id in ("cpu3c-2-4", "cpu5c-2-4", "cpu3c-4-8"):
+        try:
+            pod = runpod.create_pod(
+                name="jepa-download",
+                image_name="runpod/base:0.4.4-py3.11",
+                gpu_type_id=None,
+                instance_id=instance_id,
+                network_volume_id=volume_id,
+                volume_mount_path="/workspace",
+                container_disk_in_gb=5,
+                ports="22/tcp",
+                env={"PUBLIC_KEY": pubkey},
+            )
+            print(f"CPU pod created ({instance_id}): {pod['id']}")
+            break
+        except Exception as e:
+            print(f"  {instance_id} unavailable: {e}")
+    else:
+        sys.exit("No CPU pod instances available. Try again in a moment.")
+
+    pod_id = pod["id"]
+    try:
+        # Wait for SSH to become available
+        print("Waiting for SSH...", end="", flush=True)
+        ip, port = None, None
+        for _ in range(60):
+            time.sleep(5)
+            pods = runpod.get_pods()
+            for p in pods:
+                if p["id"] != pod_id:
+                    continue
+                for pt in ((p.get("runtime") or {}).get("ports") or []):
+                    if pt.get("isIpPublic") and pt["privatePort"] == 22:
+                        ip, port = pt["ip"], pt["publicPort"]
+            if ip:
+                # Test if SSH is actually accepting connections
+                r = subprocess.run(
+                    ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                     "-i", ssh_key, f"root@{ip}", "-p", str(port), "echo ok"],
+                    capture_output=True
+                )
+                if r.returncode == 0:
+                    print(" ready.")
+                    break
+            print(".", end="", flush=True)
+        else:
+            sys.exit("Timed out waiting for SSH.")
+
+        ssh_opts = ["-o", "StrictHostKeyChecking=no", "-i", ssh_key, "-p", str(port)]
+
+        # Rsync results and checkpoints
+        os.makedirs("results", exist_ok=True)
+        os.makedirs("checkpoints", exist_ok=True)
+        for remote, local in [
+            ("/workspace/results/",     "./results/"),
+            ("/workspace/checkpoints/", "./checkpoints/"),
+        ]:
+            print(f"Rsyncing {remote} -> {local}")
+            subprocess.run([
+                "rsync", "-avz", "--progress",
+                "-e", f"ssh {' '.join(ssh_opts)}",
+                f"root@{ip}:{remote}", local,
+            ], check=True)
+
+        print("Download complete.")
+    finally:
+        print(f"Terminating CPU pod {pod_id}...")
+        runpod.terminate_pod(pod_id)
+        print("Done.")
+
+
 def cmd_status(args):
     load_env()
     runpod.api_key = get_required("RUNPOD_API_KEY")
@@ -138,8 +221,9 @@ if __name__ == "__main__":
     sub.add_parser("stop")
     sub.add_parser("delete")
     sub.add_parser("status")
+    sub.add_parser("download")
     args = parser.parse_args()
-    dispatch = {"create": cmd_create, "stop": cmd_stop, "delete": cmd_delete, "status": cmd_status}
+    dispatch = {"create": cmd_create, "stop": cmd_stop, "delete": cmd_delete, "status": cmd_status, "download": cmd_download}
     if args.cmd not in dispatch:
         parser.print_help()
         sys.exit(1)
