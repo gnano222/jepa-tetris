@@ -16,13 +16,13 @@ fi
 # Install project in editable mode (deps already in image)
 pip install -q -e "$REPO_DIR/"
 
+# Ensure target dirs exist on volume
+mkdir -p /workspace/data /workspace/checkpoints /workspace/results
+
 # Symlink volume directories into repo so existing commands work unchanged
 ln -sfn /workspace/data      "$REPO_DIR/data"
 ln -sfn /workspace/checkpoints "$REPO_DIR/checkpoints"
 ln -sfn /workspace/results     "$REPO_DIR/results"
-
-# Ensure target dirs exist on volume
-mkdir -p /workspace/data /workspace/checkpoints /workspace/results
 
 cd "$REPO_DIR"
 
@@ -41,5 +41,10 @@ python -m jepa_tetris.train \
   --out "$OUT" \
   --run "$RUN"
 
-echo "==> Training complete. Stopping pod..."
-runpodctl pod stop "$RUNPOD_POD_ID"
+echo "==> Training complete."
+if [ -n "${RUNPOD_POD_ID:-}" ]; then
+  echo "==> Stopping pod..."
+  runpodctl pod stop "$RUNPOD_POD_ID"
+else
+  echo "==> RUNPOD_POD_ID not set; skipping pod stop (not running on RunPod)."
+fi
