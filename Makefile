@@ -5,9 +5,6 @@
 
 GPU    ?= NVIDIA RTX 4090
 STEPS  ?= 50000
-POD_ID  = $(shell cat .pod_id 2>/dev/null || echo "")
-SSH_CMD = $(shell python scripts/runpod_pod.py status 2>/dev/null | grep -v "No pods" | head -1 | awk '{print $$1}')
-
 .PHONY: help train train-a100 train-h100 stop delete status upload-data get-checkpoints get-results ssh logs
 
 help:
@@ -46,6 +43,8 @@ delete:
 status:
 	python scripts/runpod_pod.py status
 
+# POD_SSH is intentionally unquoted — it expands to multiple shell words
+# (e.g. "root@1.2.3.4 -p 22222 -i ~/.ssh/id_rsa"), not a single path.
 # Upload data files to the network volume via a cheap CPU pod.
 # Requires: POD_SSH set to the SSH connection string shown in RunPod UI
 # Example: make upload-data POD_SSH="root@<ip> -p <port> -i ~/.ssh/id_rsa"
