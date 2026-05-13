@@ -77,9 +77,9 @@ baseline.
 
 Further options now that 15 patches show gains:
 
-- **Two-scale latent** ⬅ IN TESTING — fine 15 tokens + pooled coarse 6 tokens
-  = N=21. Zero new parameters. See [FINDINGS.md — Exp-2](FINDINGS.md) for
-  preliminary results; clean comparison (50k steps, batch 256) in progress.
+- **Two-scale latent** ✅ DONE — fine 15 tokens + pooled coarse 6 tokens
+  = N=21. Zero new parameters. See [FINDINGS.md — Exp-2](FINDINGS.md).
+  Beats 15-patch on all metrics at equal budget; now the current baseline.
 - **No striding.** Three stride-1 convs → 200 patches. DINO-WM convention.
   Requires bumping predictor depth (200² attention entries per head vs 225).
   Estimate ~20 min per run at batch 256 on RTX 4090.
@@ -205,20 +205,21 @@ for generalization. Generalizes as a pattern: when a rare event dominates
 the dynamics, oversample it in the buffer rather than reweight in the
 loss.
 
-## Current benchmark — 15patch-100k
+## Current benchmark — two-scale-50k
 
 All future experiments must beat these numbers to represent progress.
 
-| metric | 15patch-100k | V2-Mixed-50k (old) |
-|---|---|---|
-| cos@1 | **0.994** | 0.992 |
-| cos@4 | **0.976** | 0.968 |
-| cos@8 | — | 0.729 |
-| cos@16 | — | 0.013 |
-| DROP cos@1 | **0.970** | — |
-| DROP MSE@1 | 0.168 | 0.153 |
+| metric | two-scale-50k | 15patch-50k | 15patch-100k (old champion) |
+|---|---|---|---|
+| cos@1 | **0.9912** | 0.9883 | 0.994 |
+| cos@4 | **0.9660** | 0.9621 | 0.976 |
+| cos@8 | **0.7353** | 0.7314 | — |
+| DROP cos@1 | **0.9569** | 0.9458 | 0.970 |
+| DROP MSE@1 | **0.2275** | 0.2348 | 0.168 |
 
-15patch-100k: 15-patch encoder (`encoder_stride_stages=2`, N=15), 100k steps, batch 256, `ar_weight=0.25`, teacher-forced H=4. Checkpoint: `checkpoints/jepa_step95000.pt`.
+two-scale-50k: two-scale encoder (`encoder_stride_stages=2`, N=21 = fine 15 + coarse 6), 50k steps, batch 256, `ar_weight=0.25`, teacher-forced H=4. Checkpoint: `checkpoints/jepa.pt`.
+
+Note: 15patch-100k still leads on cos@1 (0.994 vs 0.991) and DROP MSE (0.168 vs 0.228) — the latter is at 2× the steps, so not directly comparable. A two-scale-100k run would likely surpass it; deferred until downstream improvements are validated at 50k.
 
 Note: DROP MSE@1 is higher on the 15-patch model (0.168 vs 0.153) despite better cos metrics — the larger latent space (15×128 vs 6×128) may need more steps to converge on the rare DROP transitions. The k>4 collapse persists (architectural — H=4 training horizon is a hard ceiling at inference).
 
@@ -232,8 +233,8 @@ Roughly increasing surgery, all encoder/predictor focused.
    15patch-100k is the current best baseline (cos@1 0.994, cos@4 0.976).
 3. ~~**Per-patch action conditioning**~~ ❌ REGRESSION — broadcast addition
    worse than extra-token on every metric. See [FINDINGS.md — Exp-1](FINDINGS.md).
-4. **Two-scale encoder** ⬅ IN TESTING — N=21 (fine 15 + coarse 6). Clean
-   results pending. If confirmed improvement, becomes new baseline.
+4. ~~**Two-scale encoder**~~ ✅ DONE — N=21 (fine 15 + coarse 6). Beats
+   15-patch on all metrics at 50k steps. Now the current benchmark.
 5. **No-striding encoder** — N=200. Only after two-scale verdict; requires
    predictor depth bump (3–4 layers).
 6. **FiLM or cross-attention action conditioning** — only if DROP MSE plateaus

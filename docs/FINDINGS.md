@@ -509,9 +509,22 @@ Fine stream: flatten → `(B, 15, 128)`. Coarse stream: AdaptiveAvgPool2d to
 sample, even with identical total data seen. Architecture comparisons must
 hold both batch size AND step count constant.
 
-**Results (Run 3 — clean comparison):** *pending — run in progress at time of writing.*
+**Results (Run 3 — clean comparison at 50k steps, batch 256, ar_weight=0.25):**
 
-**Preliminary signal from Run 1** (before AR confound corrupted k=4):
-k=1 cos_sim 0.9946 vs baseline 0.9921, DROP k=1 cos_sim 0.9732 vs 0.9606,
-offdiag_cov 0.011 vs 0.015. Single-step metrics marginally better; multi-step
-pending the clean run.
+| metric | 15patch-50k (N=15) | Two-scale-50k (N=21) | delta |
+|---|---|---|---|
+| k=1 cos_sim | 0.9883 | **0.9912** | +0.003 |
+| k=4 cos_sim | 0.9621 | **0.9660** | +0.004 |
+| k=8 cos_sim | 0.7314 | **0.7353** | +0.004 |
+| DROP k=1 cos_sim | 0.9458 | **0.9569** | +0.011 |
+| DROP k=1 MSE | 0.2348 | **0.2275** | −0.007 |
+
+**Conclusion.** Two-scale wins on every metric at equal training budget. The
+clearest gain is DROP prediction (+1.1pp cos@1): the coarse 6-token pooled
+view captures global board layout (skyline height, well structure) that the
+fine 15-token stream resolves only indirectly. When a piece drops, both local
+patch changes (where it lands) and global height change (skyline collapses)
+are relevant — the two streams handle these at different resolution scales.
+
+**New benchmark.** Two-scale-50k (N=21, batch 256, 50k steps, ar_weight=0.25)
+supersedes 15patch-50k. Checkpoint: `checkpoints/jepa.pt`.
