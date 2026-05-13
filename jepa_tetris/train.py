@@ -166,6 +166,9 @@ def main():
     parser.add_argument("--encoder-stride-stages", type=int, default=3, choices=[2, 3],
                         help="Stride-2 downsampling stages: 3 (default) = 6 patches, "
                              "2 = 15 patches (finer spatial resolution).")
+    parser.add_argument("--encoder-two-scale", action="store_true",
+                        help="Concat fine (15) + coarse (6) patch streams → N=21. "
+                             "Requires --encoder-stride-stages 2.")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -192,6 +195,7 @@ def main():
         residual_blocks=args.encoder_residual_blocks,
         aux_channels=args.encoder_aux_channels,
         stride_stages=args.encoder_stride_stages,
+        two_scale=args.encoder_two_scale,
     ).to(device)
     target_encoder = copy.deepcopy(encoder).to(device)
     for p in target_encoder.parameters():

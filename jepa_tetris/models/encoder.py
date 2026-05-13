@@ -7,6 +7,10 @@ stride_stages controls spatial resolution:
   3 (default): 20x10 -> 10x5 -> 5x3 -> 3x2  → N=6  patches  (V2 baseline)
   2:           20x10 -> 10x5 -> 5x3           → N=15 patches  (finer granularity)
 
+two_scale (requires stride_stages=2):
+  Fine tokens (5x3=15) + coarse tokens (3x2=6 via adaptive avg pool) → N=21.
+  Zero extra parameters; the coarse stream is a pooled view of the same feature map.
+
 Flags:
 - aux_channels: prepend hand-engineered features (column heights, holes mask,
   bumpiness) to the input; total input channels become 2 + 3 = 5
@@ -76,6 +80,7 @@ class StateEncoder(nn.Module):
 
     stride_stages=3 (default): channels [D//4, D//2, D], 20x10 -> 3x2, N=6 patches.
     stride_stages=2:           channels [D//2, D],       20x10 -> 5x3, N=15 patches.
+    two_scale=True:            stride_stages=2 fine (15) + adaptive-pooled coarse (6) = N=21.
     """
 
     def __init__(
@@ -86,6 +91,7 @@ class StateEncoder(nn.Module):
         board_h: int = 20,
         board_w: int = 10,
         stride_stages: int = 3,
+        two_scale: bool = False,
     ):
         super().__init__()
         if patch_dim % 32 != 0:
@@ -94,8 +100,11 @@ class StateEncoder(nn.Module):
             )
         if stride_stages not in (2, 3):
             raise ValueError(f"stride_stages must be 2 or 3, got {stride_stages}")
+        if two_scale and stride_stages != 2:
+            raise ValueError("two_scale requires stride_stages=2")
         self.patch_dim = patch_dim
         self.stride_stages = stride_stages
+        self.two_scale = two_scale
         self.use_aux_channels = aux_channels
         self.board_h = board_h
         self.board_w = board_w
@@ -123,15 +132,28 @@ class StateEncoder(nn.Module):
 
         out_h, out_w = _spatial_after_strides(board_h, board_w, strides)
         self.out_spatial = (out_h, out_w)
-        self.num_patches = out_h * out_w
+
+        if two_scale:
+            # Coarse stream: pool fine (5,3) map down to (3,2) — same resolution as V2 baseline.
+            self.coarse_pool = nn.AdaptiveAvgPool2d((3, 2))
+            self.num_patches = out_h * out_w + 3 * 2  # 15 fine + 6 coarse = 21
+        else:
+            self.num_patches = out_h * out_w
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """(B, C_in, H, W) -> (B, num_patches, patch_dim)."""
         if self.use_aux_channels:
             aux = compute_aux_channels(x)
             x = torch.cat([x, aux], dim=1)
-        h = self.conv(x)                                       # (B, D, H', W')
-        return h.flatten(2).transpose(1, 2).contiguous()       # (B, N, D)
+        h = self.conv(x)                                              # (B, D, H', W')
+        fine = h.flatten(2).transpose(1, 2).contiguous()             # (B, N_fine, D)
+        if self.two_scale:
+            # AdaptiveAvgPool2d with non-integer ratios (5->3, 3->2) is unsupported on MPS.
+            h_pool = h.cpu() if h.device.type == "mps" else h
+            coarse = self.coarse_pool(h_pool).to(h.device)            # (B, D, 3, 2)
+            coarse = coarse.flatten(2).transpose(1, 2).contiguous()  # (B, 6, D)
+            return torch.cat([fine, coarse], dim=1)                   # (B, 21, D)
+        return fine
 
 
 def make_encoder_from_args(args: dict, device=None) -> StateEncoder:
@@ -141,6 +163,7 @@ def make_encoder_from_args(args: dict, device=None) -> StateEncoder:
         residual_blocks=args.get("encoder_residual_blocks", 0),
         aux_channels=args.get("encoder_aux_channels", False),
         stride_stages=args.get("encoder_stride_stages", 3),
+        two_scale=args.get("encoder_two_scale", False),
     )
     if device is not None:
         enc = enc.to(device)
