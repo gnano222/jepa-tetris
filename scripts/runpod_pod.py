@@ -8,6 +8,8 @@ import time
 
 import runpod
 
+_WATCHER_LOG = os.path.join(os.path.expanduser("~"), ".jepa_watcher.log")
+
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _POD_ID_FILE = os.path.join(_REPO_ROOT, ".pod_id")
 
@@ -90,6 +92,16 @@ def cmd_create(args):
     print(f"Branch: {branch} | GPU: {gpu_type} | Image: {image}")
     print(f"Checkpoint: checkpoints/jepa-{branch}.pt")
     print("Startup log: /workspace/startup.log")
+
+    # Spawn a background watcher that auto-downloads when the pod exits.
+    script = os.path.abspath(__file__)
+    subprocess.Popen(
+        [sys.executable, script, "watch", pod_id],
+        start_new_session=True,
+        stdout=open(_WATCHER_LOG, "a"),
+        stderr=subprocess.STDOUT,
+    )
+    print(f"Auto-download watcher started (log: {_WATCHER_LOG})")
 
 
 def cmd_stop(args):
@@ -194,6 +206,42 @@ def cmd_download(args):
         print("Done.")
 
 
+def cmd_watch(args):
+    """Background watcher: poll until pod exits then auto-download. Called automatically by create."""
+    load_env()
+    runpod.api_key = get_required("RUNPOD_API_KEY")
+    pod_id = args.pod_id
+
+    print(f"[watcher] monitoring pod {pod_id}", flush=True)
+    while True:
+        time.sleep(30)
+        try:
+            pods = runpod.get_pods()
+        except Exception as e:
+            print(f"[watcher] poll error: {e}", flush=True)
+            continue
+        for p in pods:
+            if p["id"] == pod_id and p.get("desiredStatus") == "EXITED":
+                print(f"[watcher] pod {pod_id} exited — starting download", flush=True)
+                cmd_download(args)
+                _notify("jepa-tetris training complete", "Results downloaded to ./checkpoints/ and ./results/")
+                print("[watcher] done.", flush=True)
+                return
+        print("[watcher] still running...", flush=True)
+
+
+def _notify(title, message):
+    """Fire a macOS notification (silent no-op on other platforms)."""
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{message}" with title "{title}"'],
+            check=True, capture_output=True,
+        )
+    except Exception:
+        pass
+
+
 def cmd_status(args):
     load_env()
     runpod.api_key = get_required("RUNPOD_API_KEY")
@@ -222,8 +270,11 @@ if __name__ == "__main__":
     sub.add_parser("delete")
     sub.add_parser("status")
     sub.add_parser("download")
+    p_watch = sub.add_parser("watch")
+    p_watch.add_argument("pod_id", help="Pod ID to monitor")
     args = parser.parse_args()
-    dispatch = {"create": cmd_create, "stop": cmd_stop, "delete": cmd_delete, "status": cmd_status, "download": cmd_download}
+    dispatch = {"create": cmd_create, "stop": cmd_stop, "delete": cmd_delete,
+                "status": cmd_status, "download": cmd_download, "watch": cmd_watch}
     if args.cmd not in dispatch:
         parser.print_help()
         sys.exit(1)

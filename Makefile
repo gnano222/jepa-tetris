@@ -17,7 +17,7 @@ help:
 	@echo "  make stop               Stop the current pod (preserves /workspace)"
 	@echo "  make delete             Permanently delete the current pod"
 	@echo "  make status             List all pods and their state"
-	@echo "  make download           Spin up CPU pod, rsync checkpoints+results, terminate"
+	@echo "  make download           Manually rsync checkpoints+results (runs automatically after train)"
 	@echo "  make upload-data        Upload local data/*.npz to network volume"
 	@echo "  make get-checkpoints    Download checkpoints from pod to local ./checkpoints/"
 	@echo "  make get-results        Download results/ from pod to local ./results/"
