@@ -155,6 +155,12 @@ def main():
                         help="Number of TransformerEncoderLayer blocks in the predictor.")
     parser.add_argument("--predictor-no-residual", action="store_true",
                         help="Disable residual prediction. Default predicts Δz.")
+    parser.add_argument("--predictor-film", action="store_true",
+                        help="FiLM action conditioning: per-layer (γ,β) modulation of patch "
+                             "tokens. Replaces the default extra-token approach.")
+    parser.add_argument("--predictor-cross-attn", action="store_true",
+                        help="Cross-attention action conditioning: patches attend to action as "
+                             "KV tokens after each self-attention block. Replaces extra-token.")
     parser.add_argument("--counterfactual", action="store_true",
                         help="Train against all NUM_ACTIONS counterfactual next-states per "
                              "starting state. Requires a buffer produced with --counterfactual. "
@@ -209,6 +215,8 @@ def main():
         num_heads=args.predictor_heads,
         depth=args.predictor_depth,
         residual=not args.predictor_no_residual,
+        film=args.predictor_film,
+        cross_attn=args.predictor_cross_attn,
     ).to(device)
 
     params = (
