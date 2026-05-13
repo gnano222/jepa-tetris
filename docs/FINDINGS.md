@@ -481,3 +481,37 @@ the piece lands, not the entire board.
 `γ, β` produced from the action embedding) or dedicated cross-attention
 from the action to patch tokens are the right upgrades — not broadcast
 addition. See Predictor §2 in the roadmap.
+
+---
+
+## Exp-2 — Two-scale encoder: fine (15) + coarse (6) patches = N=21 (2026-05-12)
+
+**Question.** Does explicitly concatenating a coarse global stream (6 tokens,
+pooled from the same conv output) with the fine 15-patch stream give the
+predictor better separation between global layout (skyline, wells) and local
+detail (piece position)?
+
+**Architecture.** Single conv stack (stride_stages=2) → `(B, 128, 5, 3)`.
+Fine stream: flatten → `(B, 15, 128)`. Coarse stream: AdaptiveAvgPool2d to
+`(3, 2)` → `(B, 6, 128)`. Concat → `(B, 21, 128)`. Zero new parameters.
+
+**Setup — three runs, only one clean:**
+
+| run | steps | batch | ar_weight | samples | verdict |
+|---|---|---|---|---|---|
+| 1 | 50 000 | 2 048 | 0.00 | 102M | ❌ missing AR — k=4 covariance collapsed |
+| 2 | 6 250 | 2 048 | 0.25 | 12.8M | ❌ large batch — only 6250 gradient steps vs baseline's 50000 |
+| 3 | 50 000 | 256 | 0.25 | 12.8M | ✅ clean comparison — matches 15patch baseline exactly |
+
+**Key learning about large-batch training.** 12.8M samples at batch 2048
+(6250 gradient steps) is NOT equivalent to 12.8M samples at batch 256
+(50000 gradient steps). Fewer gradient updates → worse convergence per
+sample, even with identical total data seen. Architecture comparisons must
+hold both batch size AND step count constant.
+
+**Results (Run 3 — clean comparison):** *pending — run in progress at time of writing.*
+
+**Preliminary signal from Run 1** (before AR confound corrupted k=4):
+k=1 cos_sim 0.9946 vs baseline 0.9921, DROP k=1 cos_sim 0.9732 vs 0.9606,
+offdiag_cov 0.011 vs 0.015. Single-step metrics marginally better; multi-step
+pending the clean run.

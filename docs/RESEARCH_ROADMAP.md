@@ -75,15 +75,14 @@ attention entries per head). Requires encoder rewrite (remove one stride-2
 conv) + full retrain. Measure DROP MSE@1, cos@1, and cos@4 against V2-Mixed
 baseline.
 
-Further options if 15 patches show gains:
+Further options now that 15 patches show gains:
 
-- **No striding.** Three stride-1 convs (receptive-field only), tokenize at
-  full resolution → 200 patches per board. Matches DINO-WM's convention
-  (~196 patches per image). 200² = 40k attention entries per head — still
-  fast on M-series.
-- **Two-scale latent.** Concatenate a coarse 6-token stream and a fine
-  ~50-token stream. Coarse handles global layout (skyline); fine handles
-  the falling piece. Feature-pyramid style.
+- **Two-scale latent** ⬅ IN TESTING — fine 15 tokens + pooled coarse 6 tokens
+  = N=21. Zero new parameters. See [FINDINGS.md — Exp-2](FINDINGS.md) for
+  preliminary results; clean comparison (50k steps, batch 256) in progress.
+- **No striding.** Three stride-1 convs → 200 patches. DINO-WM convention.
+  Requires bumping predictor depth (200² attention entries per head vs 225).
+  Estimate ~20 min per run at batch 256 on RTX 4090.
 
 ### Deeper conv stack
 Three stride-2 convs give a ~15×15 receptive field — enough to "see" the
@@ -103,16 +102,8 @@ was removed in the V2 simplification — bring it back if width matters.
 V2 is a 2-layer transformer with `residual=True` by default (predicts Δz).
 Open directions:
 
-### ~~Per-patch action conditioning~~ ❌ TESTED — REGRESSION (2026-05-12)
-Broadcast addition (`z = z + a_emb.unsqueeze(1)`) tested against the extra-token
-baseline at equal sample budget (~12.8M samples, 15-patch encoder). Regressed on
-every metric: cos@1 0.966 vs 0.992, cos@4 0.893 vs 0.969, offdiag_cov 0.087 vs
-0.015, z_std 0.603 vs 0.868. The extra-token approach wins because self-attention
-can learn per-patch action relevance weights; broadcast gives every patch the same
-perturbation and removes that spatial routing.
-
-**If stronger action conditioning is needed**, skip broadcast and go directly to
-FiLM or cross-attention (see §2 below). See [FINDINGS.md — Exp-1](FINDINGS.md).
+### ~~Per-patch action conditioning~~ ❌ TESTED — REGRESSION
+See [FINDINGS.md — Exp-1](FINDINGS.md). Skip to FiLM/cross-attention if stronger conditioning is needed.
 
 ### Stronger action conditioning: FiLM / cross-attention
 Per-patch broadcast addition is the lightest form of "action everywhere." If
@@ -241,16 +232,15 @@ Roughly increasing surgery, all encoder/predictor focused.
    15patch-100k is the current best baseline (cos@1 0.994, cos@4 0.976).
 3. ~~**Per-patch action conditioning**~~ ❌ REGRESSION — broadcast addition
    worse than extra-token on every metric. See [FINDINGS.md — Exp-1](FINDINGS.md).
-4. **FiLM or cross-attention action conditioning** (Predictor §2) — the right
-   next step for stronger action routing. FiLM produces per-block `(γ, β)` from
-   the action; cross-attention lets patch tokens attend to the action as KV.
-   Either generalises to structured action spaces without changing the predictor
-   interface. Evaluate via DROP MSE@1 on the 15-patch baseline.
-   - **4a. Multi-step stability tricks** (Predictor §3) — random K /
-     curriculum K / stop-grad on early steps. Folds into the same retrain.
-   - **4b. Cosine loss A/B** (Predictor §4) — orthogonal one-flag experiment.
-5. **Heuristic distillation** (Data) — higher line-clear density in the
-   buffer. DROP MSE@1 is the main bottleneck; the model barely sees line-clear
-   transitions in the current mixed-exploration buffer (~0.5% density).
-6. **Structured action encoder** (Action encoder §1) — only when moving to a
-   non-Tetris domain. Predictor interface already treats `a_emb` as opaque.
+4. **Two-scale encoder** ⬅ IN TESTING — N=21 (fine 15 + coarse 6). Clean
+   results pending. If confirmed improvement, becomes new baseline.
+5. **No-striding encoder** — N=200. Only after two-scale verdict; requires
+   predictor depth bump (3–4 layers).
+6. **FiLM or cross-attention action conditioning** — only if DROP MSE plateaus
+   after encoder improvements. FiLM adds per-block `(γ, β)` from the action
+   embedding; cross-attention lets patches attend to the action as KV tokens.
+7. **Heuristic distillation** (Data) — higher line-clear density in the buffer.
+   DROP accuracy is the persistent bottleneck; ~0.5% line-clear density in the
+   current buffer gives the model very little signal for the most state-changing
+   transition.
+8. **Structured action encoder** — only when moving beyond Tetris.
