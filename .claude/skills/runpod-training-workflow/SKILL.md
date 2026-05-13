@@ -105,6 +105,35 @@ The `JEPA_OUT` env var is read by `runpod_pod.py` and passed to the pod, which p
 
 **Always compare at the same batch size AND step count.** `N samples = steps × batch_size`, but a run with batch 2048 at 6250 steps is NOT equivalent to batch 256 at 50000 steps — fewer gradient updates means worse convergence per sample even with identical total data seen. The established baseline uses **batch 256, 50k steps**. Match both when doing architecture comparisons.
 
+## Monitoring In-Progress Runs
+
+```bash
+make status                        # list all pods and their desiredStatus (RUNNING / EXITED)
+cat ~/.jepa_watcher.log            # tail the auto-download watcher ("still running..." every 30 s)
+```
+
+**Estimating time remaining.** The startup log on the volume shows a tqdm progress bar. To read it mid-run, wait until the pod has SSH available (training image has no sshd — it won't), so instead check the intermediate step checkpoints:
+
+```bash
+make download   # pulls whatever step checkpoints have landed so far
+ls -lt checkpoints/jepa_step*.pt | head -5   # see latest saved step and its timestamp
+```
+
+Step checkpoints save every 5000 steps by default (`--ckpt-every`). From the gap between two consecutive checkpoint timestamps you can extrapolate time-to-completion:
+
+```bash
+# e.g. step 20000 at 00:20, step 25000 at 00:35 → 15 min per 5k steps
+# 50k steps total → 50/5 × 15 = 150 min total, ~90 min remaining from step 25000
+```
+
+**After training completes** the pod sets `desiredStatus=EXITED` and the auto-watcher fires. If the watcher isn't running (e.g. pods launched manually, not via `make train`), run:
+
+```bash
+make download   # manual fallback: spins up CPU pod, rsyncs everything, terminates it
+```
+
+**Parallel runs** — `make status` shows all pods. The watcher only tracks the last-launched pod. For others, check status manually and run `make download` when they show EXITED.
+
 ## Uploading Data (one-time per volume)
 
 ```bash
