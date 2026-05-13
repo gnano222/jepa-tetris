@@ -81,11 +81,25 @@ CPU pod image: `runpod/base:1.0.3-ubuntu2204`. Falls back to `cpu5c-2-4` then `c
 Set `JEPA_EXTRA_ARGS` to pass additional flags to `jepa_tetris.train`:
 
 ```bash
-JEPA_EXTRA_ARGS="--encoder-stride-stages 2 --ar-weight 0.25 --batch-size 256" \
+JEPA_EXTRA_ARGS="--encoder-stride-stages 2 --encoder-two-scale --batch-size 256" \
   make train BRANCH=exp-my-idea
 ```
 
 These are forwarded as pod env vars and appended to the training command in `pod_startup.sh`.
+
+**Always include `--batch-size 256` in `JEPA_EXTRA_ARGS`** — the training default is 2048, not 256. The established baseline (two-scale-50k) used batch 256. Forgetting this means 8× more data per step and an unfair comparison. Every experiment JEPA_EXTRA_ARGS should contain `--batch-size 256` unless deliberately testing a different batch size.
+
+## Named Checkpoint Files
+
+By default both pods and `make train` write to `checkpoints/jepa.pt` on the shared network volume — pods running in parallel will overwrite each other. To prevent this, set `JEPA_OUT` before launching:
+
+```bash
+JEPA_OUT="checkpoints/jepa-exp-film.pt" \
+  JEPA_EXTRA_ARGS="--encoder-stride-stages 2 --encoder-two-scale --predictor-film --batch-size 256" \
+  make train BRANCH=exp-film
+```
+
+The `JEPA_OUT` env var is read by `runpod_pod.py` and passed to the pod, which passes it to `pod_startup.sh` as `--out`. Each parallel run should get a unique name. Naming convention: `jepa-<branch>.pt` (matches the auto-set default when using `make train BRANCH=...`).
 
 ## Sample Budget and Batch Size
 
@@ -113,3 +127,5 @@ Requires a running pod (CPU or GPU) with the volume attached. Get the direct TCP
 | `make download` leaves orphaned CPU pod | `finally` block terminates it. If interrupted, check `make status` and terminate via dashboard |
 | `git pull` fails (private repo) | Use `https://TOKEN@github.com/USER/REPO.git` as `GITHUB_REPO` in `.env.runpod` |
 | Run took way longer than expected | Check `JEPA_EXTRA_ARGS` — `--ar-weight 0.25` adds sequential AR rollout (~6× slower at large batch). Reduce steps proportionally or use batch 256 |
+| Results not comparable to baseline | Missing `--batch-size 256` in `JEPA_EXTRA_ARGS`. Default is 2048 — 8× more data per step than the established baseline. Always add `--batch-size 256` explicitly. |
+| Parallel pods overwrote each other's checkpoint | Both pods default to `checkpoints/jepa.pt`. Set `JEPA_OUT=checkpoints/jepa-<branch>.pt` when launching to give each run a unique file. |
