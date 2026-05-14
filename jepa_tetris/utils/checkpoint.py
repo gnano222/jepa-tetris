@@ -54,6 +54,7 @@ def load_jepa(path: str, device: torch.device) -> JepaBundle:
         film=args.get("predictor_film", False),
         spatial_film=args.get("predictor_spatial_film", False),
         hierarchical_film=args.get("predictor_hierarchical_film", False),
+        hierarchical_film_attn=args.get("predictor_hierarchical_film_attn", False),
         cross_attn=args.get("predictor_cross_attn", False),
     ).to(device)
     predictor.load_state_dict(ckpt["predictor"])

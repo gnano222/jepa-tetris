@@ -84,6 +84,7 @@ def main():
         film=ckpt["args"].get("predictor_film", False),
         spatial_film=ckpt["args"].get("predictor_spatial_film", False),
         hierarchical_film=ckpt["args"].get("predictor_hierarchical_film", False),
+        hierarchical_film_attn=ckpt["args"].get("predictor_hierarchical_film_attn", False),
         cross_attn=ckpt["args"].get("predictor_cross_attn", False),
     ).to(device)
     predictor.load_state_dict(ckpt["predictor"])

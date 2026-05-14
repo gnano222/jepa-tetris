@@ -166,6 +166,10 @@ def main():
                         help="Hierarchical FiLM: like spatial-film but action context is "
                              "updated each layer by pooling the current sequence state, so "
                              "deeper layers condition on action + prior layer predictions.")
+    parser.add_argument("--predictor-hierarchical-film-attn", action="store_true",
+                        help="Hierarchical FiLM with attention pooling: like hierarchical-film "
+                             "but replaces mean pooling with cross-attention so the feedback "
+                             "selectively attends to the most action-relevant patches.")
     parser.add_argument("--predictor-cross-attn", action="store_true",
                         help="Cross-attention action conditioning: patches attend to action as "
                              "KV tokens after each self-attention block. Replaces extra-token.")
@@ -226,6 +230,7 @@ def main():
         film=args.predictor_film,
         spatial_film=args.predictor_spatial_film,
         hierarchical_film=args.predictor_hierarchical_film,
+        hierarchical_film_attn=args.predictor_hierarchical_film_attn,
         cross_attn=args.predictor_cross_attn,
     ).to(device)
 

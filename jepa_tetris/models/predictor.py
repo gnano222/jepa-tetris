@@ -9,6 +9,9 @@ Action conditioning modes (mutually exclusive):
 - hierarchical-film: like spatial-film but the action context is updated after each
   layer by pooling the current sequence state back into it. Each layer conditions on
   action + what prior layers have already predicted (mirrors cortical feedback hierarchy).
+- hierarchical-film-attn: like hierarchical-film but replaces mean pooling with
+  cross-attention — action context attends selectively to patches rather than averaging,
+  so the feedback focuses on the most action-relevant regions (e.g. landing column for DROP).
 - cross-attn: patches attend to the action as a dedicated KV token after each
   self-attention block; action never participates in patch-to-patch attention.
 """
@@ -31,23 +34,25 @@ class Predictor(nn.Module):
         film: bool = False,
         spatial_film: bool = False,
         hierarchical_film: bool = False,
+        hierarchical_film_attn: bool = False,
         cross_attn: bool = False,
     ):
         super().__init__()
         if depth < 1:
             raise ValueError(f"depth must be >= 1, got {depth}")
-        if sum([film, spatial_film, hierarchical_film, cross_attn]) > 1:
-            raise ValueError("film, spatial_film, hierarchical_film, and cross_attn are mutually exclusive")
+        if sum([film, spatial_film, hierarchical_film, hierarchical_film_attn, cross_attn]) > 1:
+            raise ValueError("film, spatial_film, hierarchical_film, hierarchical_film_attn, and cross_attn are mutually exclusive")
         self.patch_dim = patch_dim
         self.num_patches = num_patches
         self.residual = residual
         self.film = film
         self.spatial_film = spatial_film
         self.hierarchical_film = hierarchical_film
+        self.hierarchical_film_attn = hierarchical_film_attn
         self.cross_attn = cross_attn
 
         # extra-token uses N+1 positions; all other modes use N (action injected externally)
-        seq_len = num_patches if (film or spatial_film or hierarchical_film or cross_attn) else num_patches + 1
+        seq_len = num_patches if (film or spatial_film or hierarchical_film or hierarchical_film_attn or cross_attn) else num_patches + 1
         self.pos_emb = nn.Parameter(torch.zeros(1, seq_len, patch_dim))
         nn.init.trunc_normal_(self.pos_emb, std=0.02)
 
@@ -78,6 +83,19 @@ class Predictor(nn.Module):
             # Same structure as spatial_film; differs in forward: action context updated each layer
             self.hierarchical_film_layers = nn.ModuleList(
                 [nn.Linear(patch_dim, 2 * patch_dim) for _ in range(depth)]
+            )
+        elif hierarchical_film_attn:
+            # Like hierarchical_film but uses cross-attention to pool seq → a_ctx each layer,
+            # so the feedback is selective (attends to relevant patches) rather than a mean.
+            self.hierarchical_film_layers = nn.ModuleList(
+                [nn.Linear(patch_dim, 2 * patch_dim) for _ in range(depth)]
+            )
+            self.pool_attn_layers = nn.ModuleList(
+                [nn.MultiheadAttention(patch_dim, num_heads, batch_first=True)
+                 for _ in range(depth)]
+            )
+            self.pool_attn_norms = nn.ModuleList(
+                [nn.LayerNorm(patch_dim) for _ in range(depth)]
             )
         elif cross_attn:
             # Per-layer cross-attention: patches (Q) attend to action token (K, V)
@@ -122,6 +140,29 @@ class Predictor(nn.Module):
                 gamma, beta = film_linear(a_spatial).chunk(2, dim=-1)  # (B, N, D) each
                 seq = gamma * seq + beta
                 a_ctx = seq.mean(dim=1)  # pool state → enrich action context for next layer
+            delta = seq
+
+        elif self.hierarchical_film_attn:
+            seq = z + self.pos_emb  # (B, N, D)
+            a_ctx = a_emb  # (B, D) — evolves each layer
+            for layer, film_linear, pool_attn, pool_norm in zip(
+                self.transformer_layers,
+                self.hierarchical_film_layers,
+                self.pool_attn_layers,
+                self.pool_attn_norms,
+            ):
+                seq = layer(seq)
+                a_spatial = a_ctx.unsqueeze(1) + self.pos_emb  # (B, N, D)
+                gamma, beta = film_linear(a_spatial).chunk(2, dim=-1)  # (B, N, D) each
+                seq = gamma * seq + beta
+                # Cross-attention pool: a_ctx queries the sequence selectively
+                # instead of averaging — focuses on the patches most relevant to the action.
+                a_ctx_new, _ = pool_attn(
+                    query=pool_norm(a_ctx.unsqueeze(1)),  # (B, 1, D)
+                    key=seq,
+                    value=seq,
+                )
+                a_ctx = a_ctx_new.squeeze(1)  # (B, D)
             delta = seq
 
         elif self.cross_attn:
