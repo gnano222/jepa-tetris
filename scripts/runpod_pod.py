@@ -39,22 +39,42 @@ def cmd_create(args):
     image         = get_required("RUNPOD_IMAGE")
     github_repo   = get_required("GITHUB_REPO")
 
-    gpu_type = args.gpu or "NVIDIA RTX 4090"
     branch   = args.branch or os.environ.get("JEPA_BRANCH", "main")
+
+    # Ordered GPU preference list — tried in order until one succeeds.
+    # Blackwell (sm_100+) cards work fine; pod_startup.sh auto-upgrades PyTorch.
+    _GPU_FALLBACKS = [
+        "NVIDIA GeForce RTX 4090",
+        "NVIDIA RTX A4500",
+        "NVIDIA RTX A5000",
+        "NVIDIA L40S",
+        "NVIDIA GeForce RTX 4080 SUPER",
+        "NVIDIA GeForce RTX 4080",
+        "NVIDIA RTX 6000 Ada Generation",
+        "NVIDIA RTX 5000 Ada Generation",
+        "NVIDIA RTX A6000",
+        "NVIDIA GeForce RTX 3090",
+        "NVIDIA RTX PRO 4500 Blackwell",
+        "NVIDIA GeForce RTX 5080",
+        "NVIDIA A100 80GB PCIe",
+        "NVIDIA A100-SXM4-80GB",
+    ]
+    gpu_candidates = [args.gpu] if args.gpu else _GPU_FALLBACKS
 
     # Bootstrap: always pull the branch-specific code BEFORE running pod_startup.sh.
     # This avoids the stale-cache problem where the network volume's cached
     # pod_startup.sh lags behind the branch being trained.
     startup_cmd = (
         "bash -c 'set -euo pipefail; "
-        "REPO_DIR=/workspace/jepa-tetris; "
+        "BRANCH=${JEPA_BRANCH:-main}; "
+        "REPO_DIR=/workspace/jepa-${BRANCH}; "
         "if [ -d $REPO_DIR/.git ]; then "
         "  rm -f $REPO_DIR/.git/index.lock $REPO_DIR/.git/config.lock; "
         "  git -C $REPO_DIR fetch origin && "
-        "  git -C $REPO_DIR checkout -f ${JEPA_BRANCH:-main} && "
-        "  git -C $REPO_DIR reset --hard origin/${JEPA_BRANCH:-main}; "
+        "  git -C $REPO_DIR checkout -f ${BRANCH} && "
+        "  git -C $REPO_DIR reset --hard origin/${BRANCH}; "
         "else "
-        "  git clone --branch ${JEPA_BRANCH:-main} $GITHUB_REPO $REPO_DIR; "
+        "  git clone --branch ${BRANCH} $GITHUB_REPO $REPO_DIR; "
         "fi && "
         "exec bash $REPO_DIR/scripts/pod_startup.sh' 2>&1 | tee /workspace/startup.log"
     )
@@ -72,19 +92,28 @@ def cmd_create(args):
 
     pod_name = f"jepa-{branch[:20]}"
 
-    pod = runpod.create_pod(
-        name=pod_name,
-        image_name=image,
-        gpu_type_id=gpu_type,
-        cloud_type="SECURE",
-        network_volume_id=volume_id,
-        container_disk_in_gb=20,
-        volume_in_gb=0,
-        volume_mount_path="/workspace",
-        docker_args=startup_cmd,
-        env=env_vars,
-        ports="22/tcp",
-    )
+    pod = None
+    for gpu_type in gpu_candidates:
+        try:
+            pod = runpod.create_pod(
+                name=pod_name,
+                image_name=image,
+                gpu_type_id=gpu_type,
+                cloud_type=os.environ.get("RUNPOD_CLOUD_TYPE", "SECURE"),
+                network_volume_id=volume_id,
+                container_disk_in_gb=20,
+                volume_in_gb=0,
+                volume_mount_path="/workspace",
+                docker_args=startup_cmd,
+                env=env_vars,
+                ports="22/tcp",
+            )
+            print(f"  GPU: {gpu_type} — available")
+            break
+        except Exception as e:
+            print(f"  GPU: {gpu_type} — unavailable ({e})")
+    if pod is None:
+        sys.exit("No GPU instances available. Try again later or check RunPod dashboard.")
     pod_id = pod["id"]
     with open(_POD_ID_FILE, "w") as f:
         f.write(pod_id)
