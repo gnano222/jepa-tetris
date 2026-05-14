@@ -44,6 +44,7 @@ def cmd_create(args):
     # Ordered GPU preference list — tried in order until one succeeds.
     # Blackwell (sm_100+) cards work fine; pod_startup.sh auto-upgrades PyTorch.
     _GPU_FALLBACKS = [
+        # Preferred: fast Ada/Ampere workhorses
         "NVIDIA GeForce RTX 4090",
         "NVIDIA RTX A4500",
         "NVIDIA RTX A5000",
@@ -54,10 +55,27 @@ def cmd_create(args):
         "NVIDIA RTX 5000 Ada Generation",
         "NVIDIA RTX A6000",
         "NVIDIA GeForce RTX 3090",
+        # Blackwell — auto-upgraded by pod_startup.sh
         "NVIDIA RTX PRO 4500 Blackwell",
         "NVIDIA GeForce RTX 5080",
+        "NVIDIA GeForce RTX 5090",
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+        # High-end data centre
         "NVIDIA A100 80GB PCIe",
         "NVIDIA A100-SXM4-80GB",
+        "NVIDIA H100 PCIe",
+        "NVIDIA H100 80GB HBM3",
+        # Older / smaller — slower but will do
+        "NVIDIA A40",
+        "NVIDIA L40",
+        "NVIDIA RTX A4000",
+        "NVIDIA RTX 4000 Ada Generation",
+        "NVIDIA GeForce RTX 4070 Ti",
+        "NVIDIA GeForce RTX 3090 Ti",
+        "NVIDIA GeForce RTX 3080 Ti",
+        "NVIDIA GeForce RTX 3080",
     ]
     gpu_candidates = [args.gpu] if args.gpu else _GPU_FALLBACKS
 
