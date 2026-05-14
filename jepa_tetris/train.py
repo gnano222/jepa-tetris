@@ -162,6 +162,10 @@ def main():
                         help="Spatial FiLM: per-patch per-layer (γ,β) computed from action "
                              "fused with each patch's positional embedding. More expressive "
                              "than --predictor-film.")
+    parser.add_argument("--predictor-hierarchical-film", action="store_true",
+                        help="Hierarchical FiLM: like spatial-film but action context is "
+                             "updated each layer by pooling the current sequence state, so "
+                             "deeper layers condition on action + prior layer predictions.")
     parser.add_argument("--predictor-cross-attn", action="store_true",
                         help="Cross-attention action conditioning: patches attend to action as "
                              "KV tokens after each self-attention block. Replaces extra-token.")
@@ -221,6 +225,7 @@ def main():
         residual=not args.predictor_no_residual,
         film=args.predictor_film,
         spatial_film=args.predictor_spatial_film,
+        hierarchical_film=args.predictor_hierarchical_film,
         cross_attn=args.predictor_cross_attn,
     ).to(device)
 

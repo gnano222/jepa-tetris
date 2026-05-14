@@ -6,6 +6,9 @@ Action conditioning modes (mutually exclusive):
   transformer block (V-JEPA2-AC style). Broadcast: same γ/β for all patches.
 - spatial-film: action fused with each patch's positional embedding before computing
   (γ, β), giving each patch its own modulation. Strictly more expressive than film.
+- hierarchical-film: like spatial-film but the action context is updated after each
+  layer by pooling the current sequence state back into it. Each layer conditions on
+  action + what prior layers have already predicted (mirrors cortical feedback hierarchy).
 - cross-attn: patches attend to the action as a dedicated KV token after each
   self-attention block; action never participates in patch-to-patch attention.
 """
@@ -27,22 +30,24 @@ class Predictor(nn.Module):
         dropout: float = 0.0,
         film: bool = False,
         spatial_film: bool = False,
+        hierarchical_film: bool = False,
         cross_attn: bool = False,
     ):
         super().__init__()
         if depth < 1:
             raise ValueError(f"depth must be >= 1, got {depth}")
-        if sum([film, spatial_film, cross_attn]) > 1:
-            raise ValueError("film, spatial_film, and cross_attn are mutually exclusive")
+        if sum([film, spatial_film, hierarchical_film, cross_attn]) > 1:
+            raise ValueError("film, spatial_film, hierarchical_film, and cross_attn are mutually exclusive")
         self.patch_dim = patch_dim
         self.num_patches = num_patches
         self.residual = residual
         self.film = film
         self.spatial_film = spatial_film
+        self.hierarchical_film = hierarchical_film
         self.cross_attn = cross_attn
 
         # extra-token uses N+1 positions; all other modes use N (action injected externally)
-        seq_len = num_patches if (film or spatial_film or cross_attn) else num_patches + 1
+        seq_len = num_patches if (film or spatial_film or hierarchical_film or cross_attn) else num_patches + 1
         self.pos_emb = nn.Parameter(torch.zeros(1, seq_len, patch_dim))
         nn.init.trunc_normal_(self.pos_emb, std=0.02)
 
@@ -67,6 +72,11 @@ class Predictor(nn.Module):
         elif spatial_film:
             # Per-layer linear: (action + pos_emb) -> per-patch (γ, β) of shape (B, N, D) each
             self.spatial_film_layers = nn.ModuleList(
+                [nn.Linear(patch_dim, 2 * patch_dim) for _ in range(depth)]
+            )
+        elif hierarchical_film:
+            # Same structure as spatial_film; differs in forward: action context updated each layer
+            self.hierarchical_film_layers = nn.ModuleList(
                 [nn.Linear(patch_dim, 2 * patch_dim) for _ in range(depth)]
             )
         elif cross_attn:
@@ -101,6 +111,17 @@ class Predictor(nn.Module):
                 seq = layer(seq)
                 gamma, beta = film_linear(a_spatial).chunk(2, dim=-1)  # (B, N, D) each
                 seq = gamma * seq + beta  # per-patch modulation
+            delta = seq
+
+        elif self.hierarchical_film:
+            seq = z + self.pos_emb  # (B, N, D)
+            a_ctx = a_emb  # (B, D) — evolves each layer
+            for layer, film_linear in zip(self.transformer_layers, self.hierarchical_film_layers):
+                seq = layer(seq)
+                a_spatial = a_ctx.unsqueeze(1) + self.pos_emb  # (B, N, D)
+                gamma, beta = film_linear(a_spatial).chunk(2, dim=-1)  # (B, N, D) each
+                seq = gamma * seq + beta
+                a_ctx = seq.mean(dim=1)  # pool state → enrich action context for next layer
             delta = seq
 
         elif self.cross_attn:
