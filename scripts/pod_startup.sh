@@ -5,8 +5,8 @@ set -euo pipefail
 # cloned/updated by the docker_args bootstrap in runpod_pod.py.
 # It only handles: pip install, symlinks, training, pod stop.
 
-REPO_DIR="/workspace/jepa-tetris"
 BRANCH="${JEPA_BRANCH:-main}"
+REPO_DIR="/workspace/jepa-${BRANCH}"
 
 echo "==> Branch: $BRANCH"
 

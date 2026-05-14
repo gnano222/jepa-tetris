@@ -47,16 +47,17 @@ def cmd_create(args):
     # pod_startup.sh lags behind the branch being trained.
     startup_cmd = (
         "bash -c 'set -euo pipefail; "
-        "REPO_DIR=/workspace/jepa-tetris; "
+        "BRANCH=${JEPA_BRANCH:-main}; "
+        "REPO_DIR=/workspace/jepa-${BRANCH}; "
         "if [ -d $REPO_DIR/.git ]; then "
         "  rm -f $REPO_DIR/.git/index.lock $REPO_DIR/.git/config.lock; "
         "  git -C $REPO_DIR fetch origin && "
-        "  git -C $REPO_DIR checkout -f ${JEPA_BRANCH:-main} && "
-        "  git -C $REPO_DIR reset --hard origin/${JEPA_BRANCH:-main}; "
+        "  git -C $REPO_DIR checkout -f ${BRANCH} && "
+        "  git -C $REPO_DIR reset --hard origin/${BRANCH}; "
         "else "
-        "  git clone --branch ${JEPA_BRANCH:-main} $GITHUB_REPO $REPO_DIR; "
+        "  git clone --branch ${BRANCH} $GITHUB_REPO $REPO_DIR; "
         "fi && "
-        "exec bash $REPO_DIR/scripts/pod_startup.sh' 2>&1 | tee /workspace/startup.log"
+        "exec bash $REPO_DIR/scripts/pod_startup.sh' 2>&1 | tee /workspace/startup-${JEPA_BRANCH:-main}.log"
     )
 
     env_vars = {
@@ -76,7 +77,7 @@ def cmd_create(args):
         name=pod_name,
         image_name=image,
         gpu_type_id=gpu_type,
-        cloud_type="SECURE",
+        cloud_type=os.environ.get("RUNPOD_CLOUD_TYPE", "SECURE"),
         network_volume_id=volume_id,
         container_disk_in_gb=20,
         volume_in_gb=0,
@@ -191,6 +192,8 @@ def cmd_download(args):
         for remote, local in [
             ("/workspace/results/",     "./results/"),
             ("/workspace/checkpoints/", "./checkpoints/"),
+            ("/workspace/startup.log",               "./startup.log"),
+            (f"/workspace/startup-{branch}.log",     f"./startup-{branch}.log"),
         ]:
             print(f"Rsyncing {remote} -> {local}")
             subprocess.run([
