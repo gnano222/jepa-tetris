@@ -3,7 +3,9 @@
 Action conditioning modes (mutually exclusive):
 - extra-token (default): action appended as (N+1)-th token in self-attention sequence.
 - film: action produces per-layer (γ, β) that modulate every patch token after each
-  transformer block (V-JEPA2-AC style).
+  transformer block (V-JEPA2-AC style). Broadcast: same γ/β for all patches.
+- spatial-film: action fused with each patch's positional embedding before computing
+  (γ, β), giving each patch its own modulation. Strictly more expressive than film.
 - cross-attn: patches attend to the action as a dedicated KV token after each
   self-attention block; action never participates in patch-to-patch attention.
 """
@@ -24,21 +26,23 @@ class Predictor(nn.Module):
         residual: bool = True,
         dropout: float = 0.0,
         film: bool = False,
+        spatial_film: bool = False,
         cross_attn: bool = False,
     ):
         super().__init__()
         if depth < 1:
             raise ValueError(f"depth must be >= 1, got {depth}")
-        if film and cross_attn:
-            raise ValueError("film and cross_attn are mutually exclusive")
+        if sum([film, spatial_film, cross_attn]) > 1:
+            raise ValueError("film, spatial_film, and cross_attn are mutually exclusive")
         self.patch_dim = patch_dim
         self.num_patches = num_patches
         self.residual = residual
         self.film = film
+        self.spatial_film = spatial_film
         self.cross_attn = cross_attn
 
-        # extra-token uses N+1 positions; film/cross-attn use N (action injected externally)
-        seq_len = num_patches if (film or cross_attn) else num_patches + 1
+        # extra-token uses N+1 positions; all other modes use N (action injected externally)
+        seq_len = num_patches if (film or spatial_film or cross_attn) else num_patches + 1
         self.pos_emb = nn.Parameter(torch.zeros(1, seq_len, patch_dim))
         nn.init.trunc_normal_(self.pos_emb, std=0.02)
 
@@ -58,6 +62,11 @@ class Predictor(nn.Module):
         if film:
             # Per-layer linear: action -> (γ, β) of shape (B, D) each
             self.film_layers = nn.ModuleList(
+                [nn.Linear(patch_dim, 2 * patch_dim) for _ in range(depth)]
+            )
+        elif spatial_film:
+            # Per-layer linear: (action + pos_emb) -> per-patch (γ, β) of shape (B, N, D) each
+            self.spatial_film_layers = nn.ModuleList(
                 [nn.Linear(patch_dim, 2 * patch_dim) for _ in range(depth)]
             )
         elif cross_attn:
@@ -82,6 +91,16 @@ class Predictor(nn.Module):
                 seq = layer(seq)
                 gamma, beta = film_linear(a_emb).chunk(2, dim=-1)  # (B, D) each
                 seq = gamma.unsqueeze(1) * seq + beta.unsqueeze(1)
+            delta = seq
+
+        elif self.spatial_film:
+            seq = z + self.pos_emb  # (B, N, D)
+            # Fuse action with position once per forward (pos_emb is (1, N, D))
+            a_spatial = a_emb.unsqueeze(1) + self.pos_emb  # (B, N, D)
+            for layer, film_linear in zip(self.transformer_layers, self.spatial_film_layers):
+                seq = layer(seq)
+                gamma, beta = film_linear(a_spatial).chunk(2, dim=-1)  # (B, N, D) each
+                seq = gamma * seq + beta  # per-patch modulation
             delta = seq
 
         elif self.cross_attn:
