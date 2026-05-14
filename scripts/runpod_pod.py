@@ -57,7 +57,7 @@ def cmd_create(args):
         "else "
         "  git clone --branch ${BRANCH} $GITHUB_REPO $REPO_DIR; "
         "fi && "
-        "exec bash $REPO_DIR/scripts/pod_startup.sh' 2>&1 | tee /workspace/startup-${JEPA_BRANCH:-main}.log"
+        "exec bash $REPO_DIR/scripts/pod_startup.sh' 2>&1 | tee /workspace/startup.log"
     )
 
     env_vars = {
@@ -192,8 +192,7 @@ def cmd_download(args):
         for remote, local in [
             ("/workspace/results/",     "./results/"),
             ("/workspace/checkpoints/", "./checkpoints/"),
-            ("/workspace/startup.log",               "./startup.log"),
-            (f"/workspace/startup-{branch}.log",     f"./startup-{branch}.log"),
+            ("/workspace/startup.log",  "./startup.log"),
         ]:
             print(f"Rsyncing {remote} -> {local}")
             subprocess.run([
