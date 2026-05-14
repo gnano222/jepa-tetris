@@ -205,7 +205,7 @@ def test_predictor_residual_passthrough_when_zero_delta():
     """
     torch.manual_seed(0)
     pred = Predictor(patch_dim=128, num_patches=N_DEFAULT, residual=True, depth=1)
-    # Zero out the transformer's final feedforward output projection so output ~ 0.
+    # Zero out all linear2 weights in the ModuleList layers so output ~ 0.
     for name, p in pred.named_parameters():
         if "linear2" in name and name.endswith(".weight"):
             torch.nn.init.zeros_(p)
@@ -213,7 +213,36 @@ def test_predictor_residual_passthrough_when_zero_delta():
             torch.nn.init.zeros_(p)
     z = torch.randn(4, N_DEFAULT, 128)
     a = torch.randn(4, 128)
-    # Without exact zero we can't expect bitwise equality; check residual is
-    # closer to z than a non-residual run would be.
     out = pred(z, a)
     assert out.shape == z.shape
+
+
+def test_predictor_film_shape():
+    pred = Predictor(patch_dim=128, num_patches=N_DEFAULT, film=True)
+    z = torch.randn(8, N_DEFAULT, 128)
+    a = torch.randn(8, 128)
+    out = pred(z, a)
+    assert out.shape == (8, N_DEFAULT, 128)
+
+
+def test_predictor_cross_attn_shape():
+    pred = Predictor(patch_dim=128, num_patches=N_DEFAULT, cross_attn=True)
+    z = torch.randn(8, N_DEFAULT, 128)
+    a = torch.randn(8, 128)
+    out = pred(z, a)
+    assert out.shape == (8, N_DEFAULT, 128)
+
+
+def test_predictor_film_cross_attn_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Predictor(patch_dim=128, num_patches=N_DEFAULT, film=True, cross_attn=True)
+
+
+def test_predictor_film_pos_emb_shape():
+    pred = Predictor(patch_dim=128, num_patches=N_DEFAULT, film=True)
+    assert pred.pos_emb.shape == (1, N_DEFAULT, 128)
+
+
+def test_predictor_extra_token_pos_emb_shape():
+    pred = Predictor(patch_dim=128, num_patches=N_DEFAULT)
+    assert pred.pos_emb.shape == (1, N_DEFAULT + 1, 128)
