@@ -528,3 +528,52 @@ are relevant — the two streams handle these at different resolution scales.
 
 **New benchmark.** Two-scale-50k (N=21, batch 256, 50k steps, ar_weight=0.25)
 supersedes 15patch-50k. Checkpoint: `checkpoints/jepa.pt`.
+
+---
+
+## Exp-3 — FiLM vs cross-attention action conditioning (2026-05-13)
+
+**Question.** Does stronger action conditioning via FiLM (`γ/β` modulation after
+each transformer block) or cross-attention (patches attend to action as KV token)
+improve prediction accuracy over the two-scale-50k baseline?
+
+**Setup.** Two runs at identical budget to the benchmark:
+
+| arm | steps | batch | ar_weight | conditioning | checkpoint |
+|---|---|---|---|---|---|
+| FiLM | 50 000 | 256 | 0.0 | per-layer `γ, β` from action embedding | `jepa-exp-film.pt` |
+| Cross-attn | 50 000 | 256 | 0.0 | patches attend to action as KV per layer | `jepa-exp-cross-attn.pt` |
+| Baseline (two-scale-50k) | 50 000 | 256 | 0.25 | extra-token | `jepa.pt` |
+
+Note: FiLM and cross-attn runs used `ar_weight=0.0` (no AR loss) vs baseline's 0.25.
+This is not a perfectly controlled comparison for the conditioning mechanism alone,
+but the FiLM gains are large enough that the ar_weight difference cannot explain them.
+
+**Results.**
+
+| metric | Baseline | FiLM | Cross-Attn |
+|---|---|---|---|
+| cos@1 | 0.9912 | **0.9966** | 0.9934 |
+| cos@4 | 0.9660 | **0.9820** | 0.9686 |
+| cos@8 | 0.7353 | **0.9565** | 0.5960 |
+| cos@16 | 0.023 | **0.9059** | 0.097 |
+| DROP cos@1 | 0.9569 | **0.9838** | 0.9681 |
+| DROP MSE@1 | 0.2275 | **0.1066** | 0.2159 |
+
+**Conclusion.** FiLM is a decisive improvement on every metric. The most striking
+result is long-horizon stability: cos@16 goes from ~0.02 (complete collapse) to 0.91.
+DROP MSE is halved. Cross-attention is a modest improvement at k=1–4 but regresses
+on k≥8 and collapses at k=16 — worse than the baseline on the metrics that matter most.
+
+**Why FiLM wins.** The extra-token baseline gives the action 1/22 of the attention
+budget; the predictor can under-attend to it. FiLM makes the action's `γ/β`
+modulation unconditional and unavoidable at every layer — the action signal cannot be
+diluted. This strong, consistent conditioning prevents error from compounding across
+rollout steps, which is why long-horizon performance improves so dramatically.
+
+**Why cross-attention underperforms.** Cross-attention lets patches *choose* how much
+to attend to the action. That optionality is a weakness here — the network can learn
+to ignore the action at some layers, and errors still compound over long rollouts.
+
+**New benchmark.** film-50k supersedes two-scale-50k on all metrics. Checkpoint:
+`checkpoints/jepa-exp-film.pt`. FiLM is now the default predictor on `main`.

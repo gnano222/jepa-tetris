@@ -205,23 +205,22 @@ for generalization. Generalizes as a pattern: when a rare event dominates
 the dynamics, oversample it in the buffer rather than reweight in the
 loss.
 
-## Current benchmark — two-scale-50k
+## Current benchmark — film-50k
 
 All future experiments must beat these numbers to represent progress.
 
-| metric | two-scale-50k | 15patch-50k | 15patch-100k (old champion) |
+| metric | film-50k | two-scale-50k (prev) | 15patch-100k (old champion) |
 |---|---|---|---|
-| cos@1 | **0.9912** | 0.9883 | 0.994 |
-| cos@4 | **0.9660** | 0.9621 | 0.976 |
-| cos@8 | **0.7353** | 0.7314 | — |
-| DROP cos@1 | **0.9569** | 0.9458 | 0.970 |
-| DROP MSE@1 | **0.2275** | 0.2348 | 0.168 |
+| cos@1 | **0.9966** | 0.9912 | 0.994 |
+| cos@4 | **0.9820** | 0.9660 | 0.976 |
+| cos@8 | **0.9565** | 0.7353 | — |
+| cos@16 | **0.9059** | 0.023 | — |
+| DROP cos@1 | **0.9838** | 0.9569 | 0.970 |
+| DROP MSE@1 | **0.1066** | 0.2275 | 0.168 |
 
-two-scale-50k: two-scale encoder (`encoder_stride_stages=2`, N=21 = fine 15 + coarse 6), 50k steps, batch 256, `ar_weight=0.25`, teacher-forced H=4. Checkpoint: `checkpoints/jepa.pt`.
+film-50k: two-scale encoder (`encoder_stride_stages=2`, N=21), FiLM action conditioning (`--predictor-film`), 50k steps, batch 256, `ar_weight=0.0`, teacher-forced H=4. Checkpoint: `checkpoints/jepa-exp-film.pt`.
 
-Note: 15patch-100k still leads on cos@1 (0.994 vs 0.991) and DROP MSE (0.168 vs 0.228) — the latter is at 2× the steps, so not directly comparable. A two-scale-100k run would likely surpass it; deferred until downstream improvements are validated at 50k.
-
-Note: DROP MSE@1 is higher on the 15-patch model (0.168 vs 0.153) despite better cos metrics — the larger latent space (15×128 vs 6×128) may need more steps to converge on the rare DROP transitions. The k>4 collapse persists (architectural — H=4 training horizon is a hard ceiling at inference).
+Note: the k>4 collapse that plagued all previous runs is largely solved by FiLM — cos@16 went from ~0.02 to 0.91. DROP MSE halved (0.227 → 0.107). FiLM was tested alongside cross-attention (see Exp-3 in FINDINGS.md); cross-attn is worse than the two-scale baseline on k≥8 and is not recommended.
 
 ## Suggested ordering
 
@@ -237,11 +236,10 @@ Roughly increasing surgery, all encoder/predictor focused.
    15-patch on all metrics at 50k steps. Now the current benchmark.
 5. **No-striding encoder** — N=200. Only after two-scale verdict; requires
    predictor depth bump (3–4 layers).
-6. **FiLM or cross-attention action conditioning** — only if DROP MSE plateaus
-   after encoder improvements. FiLM adds per-block `(γ, β)` from the action
-   embedding; cross-attention lets patches attend to the action as KV tokens.
+6. ~~**FiLM or cross-attention action conditioning**~~ ✅ DONE — FiLM wins
+   decisively (see Exp-3 in FINDINGS.md). Cross-attention regresses on k≥8.
+   FiLM is now the default predictor and the new benchmark.
 7. **Heuristic distillation** (Data) — higher line-clear density in the buffer.
-   DROP accuracy is the persistent bottleneck; ~0.5% line-clear density in the
-   current buffer gives the model very little signal for the most state-changing
-   transition.
+   DROP MSE improved dramatically with FiLM (0.107) but further gains likely
+   require richer training signal on rare DROP transitions.
 8. **Structured action encoder** — only when moving beyond Tetris.
