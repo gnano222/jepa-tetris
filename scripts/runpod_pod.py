@@ -114,6 +114,7 @@ def cmd_create(args):
             print(f"  GPU: {gpu_type} — unavailable ({e})")
     if pod is None:
         sys.exit("No GPU instances available. Try again later or check RunPod dashboard.")
+
     pod_id = pod["id"]
     with open(_POD_ID_FILE, "w") as f:
         f.write(pod_id)
@@ -220,6 +221,7 @@ def cmd_download(args):
         for remote, local in [
             ("/workspace/results/",     "./results/"),
             ("/workspace/checkpoints/", "./checkpoints/"),
+            ("/workspace/startup.log",  "./startup.log"),
         ]:
             print(f"Rsyncing {remote} -> {local}")
             subprocess.run([

@@ -246,3 +246,39 @@ def test_predictor_film_pos_emb_shape():
 def test_predictor_extra_token_pos_emb_shape():
     pred = Predictor(patch_dim=128, num_patches=N_DEFAULT)
     assert pred.pos_emb.shape == (1, N_DEFAULT + 1, 128)
+
+
+def test_predictor_spatial_film_shape():
+    pred = Predictor(patch_dim=128, num_patches=N_DEFAULT, spatial_film=True)
+    z = torch.randn(8, N_DEFAULT, 128)
+    a = torch.randn(8, 128)
+    out = pred(z, a)
+    assert out.shape == (8, N_DEFAULT, 128)
+
+
+def test_predictor_spatial_film_pos_emb_shape():
+    pred = Predictor(patch_dim=128, num_patches=N_DEFAULT, spatial_film=True)
+    assert pred.pos_emb.shape == (1, N_DEFAULT, 128)
+
+
+def test_predictor_spatial_film_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Predictor(patch_dim=128, num_patches=N_DEFAULT, spatial_film=True, film=True)
+
+
+def test_predictor_hierarchical_film_shape():
+    pred = Predictor(patch_dim=128, num_patches=N_DEFAULT, hierarchical_film=True)
+    z = torch.randn(8, N_DEFAULT, 128)
+    a = torch.randn(8, 128)
+    out = pred(z, a)
+    assert out.shape == (8, N_DEFAULT, 128)
+
+
+def test_predictor_hierarchical_film_pos_emb_shape():
+    pred = Predictor(patch_dim=128, num_patches=N_DEFAULT, hierarchical_film=True)
+    assert pred.pos_emb.shape == (1, N_DEFAULT, 128)
+
+
+def test_predictor_hierarchical_film_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Predictor(patch_dim=128, num_patches=N_DEFAULT, hierarchical_film=True, film=True)

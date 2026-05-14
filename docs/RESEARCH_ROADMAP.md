@@ -111,23 +111,45 @@ DROP accuracy still has headroom after it lands, two stronger conditioning
 schemes share the same philosophy but give the action more capacity to shape
 the computation — and both generalize cleanly to non-trivial action spaces:
 
-- **FiLM (Feature-wise Linear Modulation).** Action produces per-block
-  `(γ, β)` and modulates every patch's hidden state at every transformer
-  layer: `h = γ(a) ⊙ h + β(a)`. Adds ~one small Linear per block. Standard
-  in V-JEPA2-AC and many video world models — the modulation MLP doesn't
-  care about action dimensionality, so it transfers as-is when `a_emb`
-  grows from 16-d to a structured encoding.
-- **Cross-attention from action tokens to state tokens.** The action becomes
-  one (or several) KV tokens that state tokens attend to in a dedicated
-  cross-attn sublayer. Trivial extension of the existing transformer;
-  matches Genie/Sora-style conditioning. Best fit when the action embedding
-  is eventually a *sequence* (e.g. a tokenized "click(x, y)" event).
+- **~~FiLM (broadcast)~~** ✅ DONE — same `(γ, β)` for all patches at every layer.
+  Decisive win over extra-token and cross-attention (see [FINDINGS.md — Exp-3](FINDINGS.md)).
+  Now the current benchmark.
+- **Spatial FiLM** ⬅ IN PROGRESS — per-patch `(γ, β)` computed from
+  `action + pos_emb`, giving each spatial position its own modulation. Mirrors
+  cortical corticocortical feedback (spatially specific) vs. broadcast FiLM's
+  neuromodulator-style uniform signal. Checkpoint: `checkpoints/jepa-exp-spatial-film.pt`.
+- **Cross-attention from action tokens to state tokens.** ❌ TESTED — regression
+  on k≥8 vs two-scale baseline. See [FINDINGS.md — Exp-3](FINDINGS.md). Not recommended.
 
-Both stack on top of per-patch broadcast; they're not exclusive. Evaluate
-via per-action prediction MSE under counterfactual training (the metric most
-sensitive to how well the predictor distinguishes actions — the predictor
-should produce visibly different `ẑ_{t+1}` for different `a_t` on the same
-`z_t`).
+Evaluate spatial FiLM via cos@1, cos@4, cos@8, cos@16 and DROP MSE@1 against
+film-50k benchmark. The metric most sensitive to spatial conditioning is
+per-action prediction MSE — the predictor should produce visibly different
+`ẑ_{t+1}` for different `a_t` on the same `z_t`.
+
+### Hierarchical FiLM (action context evolves between layers)
+The brain's feedback hierarchy has a key property our current FiLM lacks:
+each layer receives feedback from a *different*, higher-level processed signal.
+V1 gets feedback from V5 (motion-processed), V2 gets feedback from V4
+(shape-processed) — not the same raw retinal input fed back at every level.
+
+In our predictor, every FiLM layer (broadcast or spatial) modulates from the
+same static `a_emb`. A more brain-like version updates the action context after
+each layer by pooling the current state back into it:
+
+```python
+a_ctx = a_emb
+for layer, film_linear in zip(self.transformer_layers, self.spatial_film_layers):
+    seq = layer(seq)
+    a_spatial = a_ctx.unsqueeze(1) + self.pos_emb
+    gamma, beta = film_linear(a_spatial).chunk(2, dim=-1)
+    seq = gamma * seq + beta
+    a_ctx = seq.mean(dim=1)  # pool state → enrich action context for next layer
+```
+
+Layer 2's modulation is now derived from `a_emb + what layer 1 already predicted`,
+so deeper layers condition on an increasingly processed action-state mixture.
+Gate this behind `--predictor-hierarchical-film`. Only worth testing after spatial
+FiLM results are in — adds optimization complexity, so needs a clear gain to justify.
 
 ### Multi-step training stability
 Teacher-forced K-step rollouts compound noise: at K=4 it's manageable; at
