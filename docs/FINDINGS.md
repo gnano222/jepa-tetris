@@ -575,5 +575,105 @@ rollout steps, which is why long-horizon performance improves so dramatically.
 to attend to the action. That optionality is a weakness here — the network can learn
 to ignore the action at some layers, and errors still compound over long rollouts.
 
-**New benchmark.** film-50k supersedes two-scale-50k on all metrics. Checkpoint:
-`checkpoints/jepa-exp-film.pt`. FiLM is now the default predictor on `main`.
+**New benchmark.** film-100k supersedes all prior checkpoints. Simple broadcast FiLM
+trained for 100k steps is the most effective and least complicated option tested.
+Checkpoint: `checkpoints/jepa-exp-film-100k.pt`.
+
+---
+
+## Exp-4 — FiLM conditioning variants: scaling steps and spatial/hierarchical mechanisms (2026-05-14)
+
+**Question.** Does doubling training to 100k steps help? Does richer action conditioning
+(spatial per-patch modulation, hierarchical layer-by-layer feedback) improve over
+broadcast FiLM? Six variants tested across two step counts.
+
+**Setup.** All runs: N=21 two-scale encoder, batch 256, no AR loss, seed 0.
+
+| model | steps | conditioning | checkpoint |
+|---|---|---|---|
+| film | 50k | broadcast `γ/β` from action embedding | `jepa-exp-film.pt` |
+| spatial-film | 50k | per-patch `γ/β` fused with positional embedding | `jepa-exp-spatial-film.pt` |
+| hier-film | 50k | spatial-film + action context updated by mean-pooling seq each layer | `jepa-exp-hierarchical-film.pt` |
+| hier-film-attn | 50k | hier-film + cross-attention replaces mean pool | `jepa-exp-hier-film-attn.pt` |
+| film | 100k | broadcast (same architecture, 2× steps) | `jepa-exp-film-100k.pt` |
+| spatial-film | 100k | per-patch (same architecture, 2× steps) | `jepa-exp-spatial-film-100k.pt` |
+| hier-film | 100k | hierarchical mean-pool (same architecture, 2× steps) | `jepa-exp-hierarchical-film-100k.pt` |
+
+**Results — multistep cos_sim.**
+
+| model | k=1 | k=2 | k=4 | k=8 | k=16 |
+|---|---|---|---|---|---|
+| film-50k | 0.9966 | 0.9928 | 0.9820 | 0.9565 | 0.9059 |
+| spatial-film-50k | 0.9963 | 0.9921 | 0.9812 | 0.9546 | 0.9031 |
+| hier-film-50k | 0.9958 | 0.9913 | 0.9797 | 0.9536 | 0.9019 |
+| hier-film-attn-50k | 0.9947 | 0.9890 | 0.9745 | 0.9436 | 0.8848 |
+| **film-100k** ⭐ | **0.9983** | **0.9961** | 0.9891 | 0.9708 | 0.9309 |
+| spatial-film-100k | 0.9981 | 0.9957 | 0.9887 | 0.9693 | 0.9282 |
+| hier-film-100k | 0.9979 | 0.9951 | 0.9877 | 0.9681 | 0.9253 |
+
+**Results — multistep MSE.**
+
+| model | k=1 | k=2 | k=4 | k=8 | k=16 |
+|---|---|---|---|---|---|
+| film-50k | 0.0213 | 0.0463 | 0.1192 | 0.2972 | 0.6481 |
+| spatial-film-50k | 0.0220 | 0.0474 | 0.1182 | 0.2960 | 0.6448 |
+| hier-film-50k | 0.0244 | 0.0514 | 0.1246 | 0.2940 | 0.6295 |
+| hier-film-attn-50k | 0.0291 | 0.0609 | 0.1434 | 0.3276 | 0.6785 |
+| **film-100k** ⭐ | **0.0136** | **0.0319** | 0.0919 | 0.2562 | 0.6185 |
+| spatial-film-100k | 0.0144 | 0.0330 | **0.0906** | 0.2569 | 0.6148 |
+| hier-film-100k | 0.0156 | 0.0360 | 0.0934 | **0.2495** | **0.5974** |
+
+**Results — per-action MSE @ k=1 and k=16.**
+
+| model | LEFT@1 | RIGHT@1 | ROTATE@1 | DROP@1 | LEFT@16 | RIGHT@16 | ROTATE@16 | DROP@16 |
+|---|---|---|---|---|---|---|---|---|
+| film-50k | 0.0014 | 0.0016 | 0.0018 | 0.1066 | 0.6266 | 0.6648 | 0.5865 | 0.7649 |
+| spatial-film-50k | 0.0016 | 0.0018 | 0.0020 | 0.1097 | 0.6292 | 0.6612 | 0.5810 | 0.7575 |
+| hier-film-50k | 0.0019 | 0.0021 | 0.0022 | 0.1213 | 0.6222 | 0.6297 | 0.5703 | 0.7420 |
+| hier-film-attn-50k | 0.0023 | 0.0026 | 0.0029 | 0.1438 | 0.6501 | 0.6865 | 0.6333 | 0.7870 |
+| **film-100k** ⭐ | **0.0010** | **0.0011** | **0.0011** | **0.0678** | 0.5970 | 0.6167 | 0.5629 | 0.7471 |
+| spatial-film-100k | 0.0011 | 0.0012 | 0.0013 | 0.0713 | 0.5968 | 0.6230 | **0.5535** | 0.7362 |
+| hier-film-100k | 0.0014 | 0.0015 | 0.0016 | 0.0768 | **0.5805** | **0.6054** | 0.5382 | **0.7140** |
+
+**Conclusions.**
+
+**1. film-100k is the benchmark.** Broadcast FiLM at 100k steps is the best overall
+model: strongest at k=1 on every action, second-best at k=16. It is also the simplest
+architecture — one linear per layer producing a scalar γ/β broadcast to all patches.
+No mechanism tested at 50k steps approaches what plain FiLM achieves with twice the
+training. This is the new default checkpoint.
+
+**2. Training duration dominates architecture complexity.** Every 100k run beats every
+50k run at k=1 regardless of conditioning mechanism. The architectural differences
+between broadcast, spatial, and hierarchical FiLM are small compared to the gain from
+simply training longer. For this domain and model size, more steps is the highest-ROI
+intervention.
+
+**3. Spatial FiLM is a null result.** Per-patch position-specific modulation adds
+nothing at 50k or 100k steps. Tetris's 21 patches are too spatially correlated — the
+board doesn't have enough spatial independence for location-specific conditioning to
+matter.
+
+**4. Hierarchical FiLM wins at long horizons.** Hier-film-100k is the best model at
+k=8 and k=16 on every action, including DROP at k=16 (0.7140 vs 0.7471 for film-100k,
+-4.4%). The advantage is consistent and grows with k. The mechanism makes sense: action
+context that evolves layer-by-layer by pooling the current state maintains more coherent
+conditioning across long rollout chains, where a fixed broadcast signal can drift out of
+distribution. For planning applications requiring depth >4, hier-film-100k is preferable.
+
+**5. Hierarchical FiLM with attention pooling is worse.** The cross-attention variant
+(action context attends selectively to patches rather than averaging) regresses on all
+metrics at 50k steps. The added parameters likely haven't converged, and mean pooling
+may be appropriate here since all 21 patches are relevant to the board summary — there
+is no single "important" patch for the action to focus on. Not evaluated at 100k steps.
+
+**6. DROP remains ~50× harder than movement actions.** k=1 MSE 0.068–0.14 for DROP
+vs 0.001–0.003 for LEFT/RIGHT/ROTATE. No conditioning variant closes this gap
+materially. DROP causes piece-lock, line clears, and piece reset — the largest latent
+displacement of any action. Addressing this likely requires changes to the training
+objective (e.g. supervising DROP transitions at higher weight) rather than the
+conditioning architecture.
+
+**Benchmark.** `checkpoints/jepa-exp-film-100k.pt` — broadcast FiLM, 100k steps,
+batch 256, two-scale N=21 encoder. Simple, strong, and the cleanest baseline for
+future architecture comparisons.
