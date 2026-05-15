@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Capture all output to a persistent log so it survives after pod exits.
+mkdir -p /workspace
+exec > >(tee -a /workspace/pod_startup.log) 2>&1
+echo "==> pod_startup.sh starting at $(date)"
+
 # This script runs INSIDE the pod after the git repo has already been
 # cloned/updated by the docker_args bootstrap in runpod_pod.py.
 # It only handles: pip install, GPU compat, symlinks, training, pod stop.

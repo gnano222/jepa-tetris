@@ -218,8 +218,9 @@ def cmd_download(args):
         os.makedirs("results", exist_ok=True)
         os.makedirs("checkpoints", exist_ok=True)
         for remote, local in [
-            ("/workspace/results/",     "./results/"),
-            ("/workspace/checkpoints/", "./checkpoints/"),
+            ("/workspace/results/",        "./results/"),
+            ("/workspace/checkpoints/",    "./checkpoints/"),
+            ("/workspace/pod_startup.log", "./pod_startup.log"),
         ]:
             print(f"Rsyncing {remote} -> {local}")
             subprocess.run([
