@@ -10,8 +10,8 @@ echo "==> pod_startup.sh starting at $(date)"
 # cloned/updated by the docker_args bootstrap in runpod_pod.py.
 # It only handles: pip install, GPU compat, symlinks, training, pod stop.
 
-REPO_DIR="/workspace/jepa-tetris"
 BRANCH="${JEPA_BRANCH:-main}"
+REPO_DIR="/workspace/jepa-${BRANCH}"
 
 echo "==> Branch: $BRANCH"
 
