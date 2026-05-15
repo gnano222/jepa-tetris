@@ -165,6 +165,10 @@ def main():
                         help="Train against all NUM_ACTIONS counterfactual next-states per "
                              "starting state. Requires a buffer produced with --counterfactual. "
                              "Always single-step (no horizon).")
+    parser.add_argument("--cf-multistep", action="store_true",
+                        help="Combine CF fanout at t=0 with teacher-forced multi-step at t=1..H. "
+                             "Requires --counterfactual. Uses sample_rollout so the CF buffer "
+                             "must support rollout sampling.")
     parser.add_argument("--encoder-residual-blocks", type=int, default=0,
                         help="N residual blocks at each conv stage (default 0).")
     parser.add_argument("--encoder-aux-channels", action="store_true",
@@ -240,12 +244,12 @@ def main():
         if args.counterfactual:
             mse_tf_val = None
             mse_ar_val = None
-            if args.ar_weight > 0:
-                # CF + AR: need actions_executed and the chained next-states.
+            if args.cf_multistep or args.ar_weight > 0:
+                # Both cf_multistep and CF+AR need the rollout format.
                 batch = buf.sample_rollout(args.batch_size, H, rng=rng)
                 s0 = torch.from_numpy(batch["s0"]).to(device)
                 actions_executed = torch.from_numpy(batch["actions_executed"]).to(device)
-                next_states_k = torch.from_numpy(batch["next_states_k"]).to(device)  # (B, K, A, *state)
+                next_states_k = torch.from_numpy(batch["next_states_k"]).to(device)  # (B, H, A, *state)
                 # CF loss uses the t=0 counterfactual fan-out (B, A, *state).
                 next_states_t0 = next_states_k[:, 0]
             else:
@@ -273,7 +277,32 @@ def main():
             with torch.no_grad():
                 z_target_log = target_encoder(next_states_t0[:, 0])  # (B, N, D)
 
-            if args.ar_weight > 0:
+            if args.cf_multistep:
+                # Teacher-forced on executed chain at t=1..H.
+                # on_policy[b, t] = the real next-state after executing actions_executed[b, t].
+                B = s0.shape[0]
+                idx_shape = (B, H, 1) + (1,) * len(state_shape)
+                expand_shape = (-1, -1, 1) + tuple(state_shape)
+                idx = actions_executed.view(*idx_shape).expand(*expand_shape)
+                on_policy = next_states_k.gather(2, idx).squeeze(2)    # (B, H, *state)
+
+                # TF inputs:  [s0, s1, ..., s_{H-1}]
+                # TF targets: [s1, s2, ..., s_H]
+                tf_inputs = torch.cat(
+                    [s0.unsqueeze(1), on_policy[:, :H - 1]], dim=1
+                )                                                       # (B, H, *state)
+                z_tf_in = encoder(tf_inputs.reshape(B * H, *state_shape))  # (B*H, N, D)
+                with torch.no_grad():
+                    z_tf_tgt = target_encoder(
+                        on_policy.reshape(B * H, *state_shape)
+                    )                                                   # (B*H, N, D)
+                a_emb_tf = action_encoder(actions_executed.reshape(B * H))
+                z_tf_pred = predictor(z_tf_in, a_emb_tf)
+                mse_tf = F.mse_loss(z_tf_pred, z_tf_tgt)
+                mse_tf_val = mse_tf.item()
+                mse = mse_cf + mse_tf
+                z_for_vic = z_tf_in.view(B, H, *z_tf_in.shape[1:])    # (B, H, N, D) for VICReg
+            elif args.ar_weight > 0:
                 # AR rollout along the *executed* action chain. Target at step t
                 # is the encoded next_states_k[b, t, actions_executed[b, t]].
                 B = s0.shape[0]
