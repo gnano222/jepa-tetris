@@ -42,7 +42,7 @@ Uses real encoder outputs at each step (not chained predictor outputs) — same 
 
 **FiLM** applies unconditionally at every predictor call in both terms.
 
-**Total predictor calls per step:** 4 (CF fanout) + 4 (TF chain) = 8, vs film-100k's 4 TF calls. The 25k-step run is therefore ~half the predictor compute of film-100k (200k vs 400k predictor calls); a true parity run would be 50k steps. We use 25k as the lower bound and 100k as the upper, bracketing parity.
+**Total predictor calls per step:** 4 (CF fanout) + 4 (TF chain) = 8, vs film-100k's 4 TF calls. The 50k-step run is therefore compute-parity with film-100k (50k × 8 = 400k predictor calls = 100k × 4). The 100k-step run is 2× parity.
 
 ---
 
@@ -115,8 +115,8 @@ if args.cf_multistep:
 
 | run name | steps | key flags | compute vs film-100k | checkpoint |
 |---|---|---|---|---|
-| cf-film-25k | 25 000 | `--counterfactual --cf-multistep --predictor-film --encoder-two-scale --encoder-stride-stages 2 --horizon-h 4 --batch-size 256 --ar-weight 0` | ~half parity (200k predictor calls vs film-100k's 400k) | `checkpoints/jepa-cf-film-25k.pt` |
-| cf-film-100k | 100 000 | same, `--steps 100000` | 2× film-100k (800k vs 400k predictor calls) | `checkpoints/jepa-cf-film-100k.pt` |
+| cf-film-50k | 50 000 | `--counterfactual --cf-multistep --predictor-film --encoder-two-scale --encoder-stride-stages 2 --horizon-h 4 --batch-size 256 --ar-weight 0` | parity (400k predictor calls = film-100k's 400k) | `checkpoints/jepa-cf-film-50k.pt` |
+| cf-film-100k | 100 000 | same, `--steps 100000` | 2× parity (800k predictor calls) | `checkpoints/jepa-cf-film-100k.pt` |
 
 Both: `--seed 0`, separate `--run` names for timestamped results.
 
@@ -136,8 +136,8 @@ Fills the missing FiLM-without-CF cell in the comparison matrix.
 |---|---|---|---|---|---|
 | CF only @ 5× (`jepa_cf_compare_5x.pt`) | 0.912 | 0.861 | 0.322 | 0.978 | — |
 | FiLM only (`jepa-exp-film-100k.pt`) | **eval** | **eval** | **eval** | 0.9309 | 0.0678 |
-| CF+FiLM @ 25k (parity) | **train** | **train** | **train** | **train** | **train** |
-| CF+FiLM @ 100k (full) | **train** | **train** | **train** | **train** | **train** |
+| CF+FiLM @ 50k (parity) | **train** | **train** | **train** | **train** | **train** |
+| CF+FiLM @ 100k (2× parity) | **train** | **train** | **train** | **train** | **train** |
 
 ---
 
@@ -163,7 +163,7 @@ Run on both new checkpoints after training:
 
 - **M4 with FiLM**: FiLM has never been evaluated on causality metrics. If FiLM alone already scores well on M1/M2, that changes the interpretation of the CF+FiLM result.
 - **DROP@k at long horizon**: No conditioning variant has closed the 50× gap between DROP and movement actions. CF's contrastive regularizer may help here specifically, since DROP produces the most distinct counterfactual outcome of any action.
-- **The 25k parity run**: if CF+FiLM already wins at parity compute, the combination is genuinely superior. If it only wins at 100k steps (4× compute), the story is "more compute helps" rather than "CF+FiLM is better."
+- **The 50k parity run**: if CF+FiLM already wins at parity compute, the combination is genuinely superior at equal cost. If it only wins at 100k steps (2× parity), the story is "more compute helps" rather than "CF+FiLM is better."
 
 ---
 
