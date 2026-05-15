@@ -108,6 +108,8 @@ def main():
         num_heads=pred_heads,
         depth=pred_depth,
         residual=pred_residual,
+        film=ckpt["args"].get("predictor_film", False),
+        cross_attn=ckpt["args"].get("predictor_cross_attn", False),
     ).to(device)
     predictor.load_state_dict(ckpt["predictor"])
     predictor.eval()
