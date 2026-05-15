@@ -677,3 +677,109 @@ conditioning architecture.
 **Benchmark.** `checkpoints/jepa-exp-film-100k.pt` — broadcast FiLM, 100k steps,
 batch 256, two-scale N=21 encoder. Simple, strong, and the cleanest baseline for
 future architecture comparisons.
+
+---
+
+## Exp-5 — CF+FiLM multi-step: combining counterfactual fanout with FiLM conditioning (2026-05-15)
+
+**Question.** Does combining counterfactual (CF) training with FiLM conditioning beat
+film-100k on both multistep prediction accuracy (cos@k, MSE@k) and action causality
+metrics (M1, M2, M4)?
+
+The design hypothesis: FiLM gives the predictor the *capacity* to differentiate actions
+at every layer; CF gives the encoder the *training signal* to preserve that
+action-differentiating information. Together they should be additive — neither can achieve
+alone what both achieve together.
+
+**Setup.** Two runs on the CF buffer (`data/cf_train_100k.npz`, 100k rows) with a new
+combined loss: L = L_CF@t=0 + L_TF@t=1..H + VICReg. L_CF is a four-way fanout from
+each starting state (predict all 4 action outcomes). L_TF is teacher-forced multi-step
+on the executed action chain (H=4). Both paths use FiLM conditioning.
+
+| run | steps | predictor calls | compute vs film-100k | checkpoint |
+|---|---|---|---|---|
+| cf-film-50k | 50 000 | 8 per step → 400k total | parity (1×) | `jepa-cf-film-50k.pt` |
+| cf-film-100k | 100 000 | 8 per step → 800k total | 2× parity | `jepa-cf-film-100k.pt` |
+
+Parity is measured in predictor calls: CF+FiLM makes 4 (CF fanout) + 4 (TF chain) = 8
+per step, vs film-100k's 4 (TF chain only). So 50k CF+FiLM steps = film-100k's 100k steps.
+
+**Causality baseline (run before training).** film-100k had never been evaluated on
+causality metrics. Running `causality_diagnostic.py` first revealed a key surprise:
+FiLM alone scored M1=0.983, M2=0.954, M4=0.040 — far better than the pre-FiLM CF study
+(M1=0.912, M2=0.861, M4=0.322 at 5×). FiLM's unconditional per-layer action modulation
+already largely solves the action causality problem on its own.
+
+**Results — multistep accuracy.**
+
+| model | cos@1 | cos@2 | cos@4 | cos@8 | cos@16 | MSE@1 | DROP MSE@1 |
+|---|---|---|---|---|---|---|---|
+| film-100k ⭐ | **0.9983** | **0.9961** | **0.9891** | **0.9708** | **0.9309** | **0.0136** | **0.0678** |
+| cf-film-50k (parity) | 0.9967 | 0.9930 | 0.9820 | 0.9561 | 0.9053 | 0.0245 | 0.1250 |
+| cf-film-100k (2×) | 0.9981 | 0.9958 | 0.9886 | 0.9695 | 0.9299 | 0.0186 | 0.0955 |
+
+**Results — action causality metrics.**
+
+| model | M1 (↑) | M2 (↑) | M4 (↓) | DROP causal MSE (↓) |
+|---|---|---|---|---|
+| film-100k | 0.983 | 0.954 | 0.040 | 0.164 |
+| cf-film-50k (parity) | **0.9950** | **0.9764** | 0.061 | 0.097 |
+| cf-film-100k (2×) | **0.9950** | **0.9830** | 0.051 | 0.070 |
+
+**Conclusions.**
+
+**1. CF+FiLM wins strongly on action causality.** M1 hits 0.995 (vs 0.983 for film-100k)
+and M2 hits 0.983 (vs 0.954). These are the highest M1 and M2 scores ever measured in
+this project, beating the previous CF 5× record of M1=0.912 by 8pp and M2=0.861 by 12pp.
+The CF fanout forces the encoder to preserve all-action information from every starting
+state — exactly what M1 and M2 measure.
+
+**2. CF+FiLM does not improve long-horizon prediction.** At compute parity (50k steps),
+cos@16 is 0.905 vs film-100k's 0.931 — significantly worse. At 2× compute (100k steps),
+the gap closes to 0.9299 vs 0.9309, essentially a tie within measurement noise. CF+FiLM
+at 2× compute needs 2× the GPU time to match film-100k on the metric film-100k was
+designed to win, while film-100k required no CF overhead.
+
+**3. DROP prediction splits by metric.** The CF fanout dramatically improves DROP in the
+*causality space* — DROP causal MSE drops from 0.164 (film-100k) to 0.070 (cf-film-100k),
+a 57% improvement. But DROP MSE in the *multistep eval* gets worse: 0.068 (film-100k) →
+0.096 (cf-film-100k). The explanation: the causality diagnostic evaluates single-step
+DROP prediction from a dedicated fanout loss, which CF directly supervises. The multistep
+eval measures DROP in on-policy trajectory chains, where the CF component appears to
+slightly reorganize the latent geometry in ways that hurt chained DROP accuracy.
+
+**4. FiLM already solved causality; CF improved it further.** The pre-experiment causality
+eval on film-100k showed FiLM alone scored M1=0.983 — far better than expected and better
+than all pre-FiLM CF results. The hypothesis that CF is needed to fix action causality was
+wrong in the FiLM era. CF still improves M1/M2 by 1–3pp on top of FiLM's already-strong
+baseline, but the improvement is incremental, not the transformative jump seen in pre-FiLM
+CF experiments.
+
+**5. M4 worsens slightly with CF.** No-op recognition (M4) is 0.040 for film-100k and
+0.051–0.061 for CF+FiLM — slightly worse, though both are excellent (random baseline ~1.0).
+CF training doesn't specifically help no-op states since no-op outcomes are still
+supervised; the slightly higher ratio may reflect a broader spread in the predicted
+action-delta distribution when the model is optimizing across all 4 actions.
+
+**6. The hybrid objective is a trade-off, not a Pareto improvement.** Compared to
+film-100k at matched GPU time (i.e., CF+FiLM 100k = 2× film-100k's compute):
+
+- Better: M1 (+1.2pp), M2 (+2.9pp), DROP causal MSE (−57%)
+- Worse: cos@16 (−0.001, within noise), DROP MSE@1 (+41%), M4 (+0.011)
+- Equal: cos@1, cos@2, cos@4, cos@8
+
+CF+FiLM is not a strict upgrade over film-100k. It is the right choice if the goal is
+action-discrimination precision (planning, control, counterfactual reasoning). film-100k
+remains the right choice if the goal is long-horizon on-policy prediction fidelity.
+
+**7. The 50k parity result answers the key question from the design doc.** The combination
+is NOT "genuinely superior at equal cost" — it loses on long-horizon accuracy at parity
+and only ties at 2× compute. The story is not "CF+FiLM is better"; it is "CF+FiLM
+trades prediction fidelity for action discrimination, and the trade is most favourable at
+2× compute."
+
+**Benchmark.** film-100k remains the default checkpoint for multistep prediction tasks.
+`jepa-cf-film-100k.pt` is now the reference for action causality tasks. Both checkpoints
+should be carried forward for downstream control evaluation (M1/M2 improvements should
+help the pure-latent BFS planner; whether film-100k's better cos@16 still wins on
+lines-per-episode is unknown).
