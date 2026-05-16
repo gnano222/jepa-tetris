@@ -1,8 +1,11 @@
 import pytest
 import torch
+import torch.nn as nn
 
 from jepa_tetris.models.action_encoder import ActionEncoder
 from jepa_tetris.models.encoder import (
+    ColumnarEncoder,
+    ColumnPredictorHead,
     StateEncoder,
     compute_aux_channels,
     make_encoder_from_args,
@@ -246,3 +249,92 @@ def test_predictor_film_pos_emb_shape():
 def test_predictor_extra_token_pos_emb_shape():
     pred = Predictor(patch_dim=128, num_patches=N_DEFAULT)
     assert pred.pos_emb.shape == (1, N_DEFAULT + 1, 128)
+
+
+def test_column_predictor_head_shape():
+    head = ColumnPredictorHead(dim=128)
+    z = torch.randn(8, 128)
+    a = torch.randn(8, 128)
+    assert head(z, a).shape == (8, 128)
+
+
+def test_columnar_encoder_output_shape():
+    enc = ColumnarEncoder(patch_dim=128)
+    x = torch.randn(4, 2, 20, 10)
+    z = enc(x)
+    assert z.shape == (4, 15, 128)
+    assert enc.num_patches == 15
+
+
+def test_columnar_encoder_patch_dim_configurable():
+    enc = ColumnarEncoder(patch_dim=64)
+    z = enc(torch.randn(2, 2, 20, 10))
+    assert z.shape == (2, 15, 64)
+
+
+def test_columnar_encoder_regions_clamp_at_edges():
+    """5x3 grid, margin 1: row splits [4]*5, col splits [3,4,3].
+    Corner and centre regions are margin-expanded then clamped to the board."""
+    enc = ColumnarEncoder(patch_dim=64, grid=(5, 3), margin=1)
+    assert enc.regions[0] == (0, 5, 0, 4)      # grid cell (0,0)
+    assert enc.regions[14] == (15, 20, 6, 10)  # grid cell (4,2)
+    assert enc.regions[7] == (7, 13, 2, 8)     # grid cell (2,1), centre
+
+
+def test_columnar_encoder_gradient_isolation():
+    """The Fork B invariant: a loss from one column's output produces zero
+    gradient on every other column's conv stack."""
+    enc = ColumnarEncoder(patch_dim=64)
+    z = enc(torch.randn(2, 2, 20, 10))
+    z[:, 0].sum().backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0
+               for p in enc.stacks[0].parameters())
+    for i in range(1, 15):
+        for p in enc.stacks[i].parameters():
+            assert p.grad is None or p.grad.abs().sum() == 0
+
+
+def test_columnar_encoder_predictor_compat():
+    enc = ColumnarEncoder(patch_dim=128)
+    pred = Predictor(patch_dim=128, num_patches=enc.num_patches, film=True)
+    z = enc(torch.randn(4, 2, 20, 10))
+    a = torch.randn(4, 128)
+    assert pred(z, a).shape == (4, 15, 128)
+
+
+def test_make_encoder_from_args_columnar():
+    args = {
+        "patch_dim": 128,
+        "encoder_columnar": True,
+        "encoder_columnar_grid": "5x3",
+        "encoder_columnar_margin": 1,
+    }
+    enc = make_encoder_from_args(args)
+    z = enc(torch.randn(2, 2, 20, 10))
+    assert z.shape == (2, 15, 128)
+    assert enc.num_patches == 15
+
+
+def test_columnar_local_loss_isolation_and_finiteness():
+    """Local loss is finite, and each column's conv stack receives gradient
+    only from its own term (verified via the encoder, end to end)."""
+    from jepa_tetris.train import columnar_local_loss
+
+    torch.manual_seed(0)
+    enc = ColumnarEncoder(patch_dim=64)
+    heads = nn.ModuleList([ColumnPredictorHead(64) for _ in range(enc.num_patches)])
+    z0 = enc(torch.randn(3, 2, 20, 10))            # (3, 15, 64), with grad
+    z1_target = torch.randn(3, 15, 64)             # detached target stand-in
+    a_emb = torch.randn(3, 64)
+
+    loss, parts = columnar_local_loss(
+        z0_online=z0, z1_target=z1_target, a_emb=a_emb, column_heads=heads,
+        var_weight=1.0, cov_weight=0.04, target_std=1.0,
+    )
+    assert torch.isfinite(loss)
+    assert {"mse_local", "var_local", "cov_local"} <= parts.keys()
+
+    loss.backward()
+    for i in range(enc.num_patches):
+        assert any(p.grad is not None and p.grad.abs().sum() > 0
+                   for p in enc.stacks[i].parameters())

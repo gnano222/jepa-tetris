@@ -67,6 +67,110 @@ class _ResidualBlock(nn.Module):
         return F.gelu(x + h)
 
 
+def _split_evenly(total: int, parts: int) -> list[int]:
+    """Split `total` into `parts` sizes; extra cells go to the centre tiles.
+    _split_evenly(10, 3) -> [3, 4, 3];  _split_evenly(20, 5) -> [4,4,4,4,4]."""
+    base, rem = divmod(total, parts)
+    sizes = [base] * parts
+    start = (parts - rem) // 2
+    for i in range(start, start + rem):
+        sizes[i] += 1
+    return sizes
+
+
+class ColumnPredictorHead(nn.Module):
+    """Throwaway per-column predictor: (z_c, a_emb) -> predicted next z_c.
+
+    FiLM-conditioned residual MLP. Exists only to generate a column's local
+    training signal in Fork B; discarded after training.
+    """
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.lin1 = nn.Linear(dim, dim)
+        self.film = nn.Linear(dim, 2 * dim)
+        self.lin2 = nn.Linear(dim, dim)
+
+    def forward(self, z: torch.Tensor, a_emb: torch.Tensor) -> torch.Tensor:
+        h = F.gelu(self.lin1(z))
+        gamma, beta = self.film(a_emb).chunk(2, dim=-1)
+        h = gamma * h + beta
+        return z + self.lin2(h)
+
+
+class ColumnarEncoder(nn.Module):
+    """Cortically-inspired encoder: one untied conv stack per spatial column.
+
+    The board is partitioned into a `grid` of tiles; each column reads its
+    tile plus a `margin`-cell overlap and emits one D-dim token. Columns share
+    no weights. Output (B, num_columns, D) matches the StateEncoder contract.
+    """
+
+    def __init__(
+        self,
+        patch_dim: int = 128,
+        grid: tuple[int, int] = (5, 3),
+        margin: int = 1,
+        board_h: int = 20,
+        board_w: int = 10,
+    ):
+        super().__init__()
+        if patch_dim % 32 != 0:
+            raise ValueError(
+                f"patch_dim must be divisible by 32 for GroupNorm(groups=8). got {patch_dim}."
+            )
+        self.patch_dim = patch_dim
+        self.grid = grid
+        self.margin = margin
+        self.board_h = board_h
+        self.board_w = board_w
+
+        gr, gc = grid
+        row_sizes = _split_evenly(board_h, gr)
+        col_sizes = _split_evenly(board_w, gc)
+        row_bounds = [0]
+        for s in row_sizes:
+            row_bounds.append(row_bounds[-1] + s)
+        col_bounds = [0]
+        for s in col_sizes:
+            col_bounds.append(col_bounds[-1] + s)
+
+        # regions: row-major list of (r0, r1, c0, c1), margin-expanded + clamped.
+        self.regions: list[tuple[int, int, int, int]] = []
+        for i in range(gr):
+            for j in range(gc):
+                r0 = max(0, row_bounds[i] - margin)
+                r1 = min(board_h, row_bounds[i + 1] + margin)
+                c0 = max(0, col_bounds[j] - margin)
+                c1 = min(board_w, col_bounds[j + 1] + margin)
+                self.regions.append((r0, r1, c0, c1))
+
+        self.num_patches = gr * gc
+        self.stacks = nn.ModuleList(
+            [self._make_stack(patch_dim) for _ in range(self.num_patches)]
+        )
+
+    @staticmethod
+    def _make_stack(patch_dim: int) -> nn.Sequential:
+        return nn.Sequential(
+            nn.Conv2d(2, patch_dim // 2, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, patch_dim // 2),
+            nn.GELU(),
+            nn.Conv2d(patch_dim // 2, patch_dim, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, patch_dim),
+            nn.GELU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, 2, H, W) -> (B, num_patches, patch_dim)."""
+        cols = []
+        for stack, (r0, r1, c0, c1) in zip(self.stacks, self.regions):
+            region = x[:, :, r0:r1, c0:c1]
+            h = stack(region)                       # (B, D, h', w')
+            cols.append(h.mean(dim=(2, 3)))         # (B, D) — MPS-safe global pool
+        return torch.stack(cols, dim=1)             # (B, num_patches, D)
+
+
 def _spatial_after_strides(h: int, w: int, strides: list[tuple[int, int]]) -> tuple[int, int]:
     for sh, sw in strides:
         # Conv2d kernel=3, padding=1, stride=s: out = ceil(in/s).
@@ -156,15 +260,28 @@ class StateEncoder(nn.Module):
         return fine
 
 
-def make_encoder_from_args(args: dict, device=None) -> StateEncoder:
-    """Reconstruct StateEncoder from a training checkpoint's stored args dict."""
-    enc = StateEncoder(
-        patch_dim=args["patch_dim"],
-        residual_blocks=args.get("encoder_residual_blocks", 0),
-        aux_channels=args.get("encoder_aux_channels", False),
-        stride_stages=args.get("encoder_stride_stages", 3),
-        two_scale=args.get("encoder_two_scale", False),
-    )
+def make_encoder_from_args(args: dict, device=None) -> nn.Module:
+    """Reconstruct the encoder (StateEncoder or ColumnarEncoder) from a
+    training checkpoint's stored args dict."""
+    if args.get("encoder_columnar", False):
+        grid = args.get("encoder_columnar_grid", "5x3")
+        if isinstance(grid, str):
+            gr, gc = (int(v) for v in grid.lower().split("x"))
+        else:
+            gr, gc = grid
+        enc: nn.Module = ColumnarEncoder(
+            patch_dim=args["patch_dim"],
+            grid=(gr, gc),
+            margin=args.get("encoder_columnar_margin", 1),
+        )
+    else:
+        enc = StateEncoder(
+            patch_dim=args["patch_dim"],
+            residual_blocks=args.get("encoder_residual_blocks", 0),
+            aux_channels=args.get("encoder_aux_channels", False),
+            stride_stages=args.get("encoder_stride_stages", 3),
+            two_scale=args.get("encoder_two_scale", False),
+        )
     if device is not None:
         enc = enc.to(device)
     return enc

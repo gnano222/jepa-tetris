@@ -95,6 +95,49 @@ def counterfactual_step_loss(
     return {"mse": mse, "z_pred_all": z_pred_all, "n_predictions": B * A}
 
 
+def columnar_local_loss(
+    *,
+    z0_online: torch.Tensor,
+    z1_target: torch.Tensor,
+    a_emb: torch.Tensor,
+    column_heads: torch.nn.ModuleList,
+    var_weight: float,
+    cov_weight: float,
+    target_std: float,
+) -> tuple[torch.Tensor, dict]:
+    """Per-column single-step JEPA loss (Fork B encoder signal).
+
+    Each column c predicts its own next-state latent via its own throwaway
+    head and is supervised against the (stop-grad) target encoder's column c.
+    The total loss is a plain sum over columns, so autograd confines each
+    column's gradient to its own conv stack.
+
+    z0_online: (B, N, D) online columnar encoder output at t=0 (requires grad)
+    z1_target: (B, N, D) target encoder output at t=1 (no grad)
+    a_emb:     (B, D)
+    Returns (scalar loss, {"mse_local", "var_local", "cov_local"}).
+    """
+    N = z0_online.shape[1]
+    mse_total = z0_online.new_zeros(())
+    var_total = z0_online.new_zeros(())
+    cov_total = z0_online.new_zeros(())
+    for c in range(N):
+        z_pred_c = column_heads[c](z0_online[:, c], a_emb)        # (B, D)
+        mse_total = mse_total + F.mse_loss(z_pred_c, z1_target[:, c])
+        var_total = var_total + variance_loss(z0_online[:, c], target_std=target_std)
+        cov_total = cov_total + covariance_loss(z0_online[:, c])
+    n = float(N)
+    mse_local = mse_total / n
+    var_local = var_total / n
+    cov_local = cov_total / n
+    loss = mse_local + var_weight * var_local + cov_weight * cov_local
+    return loss, {
+        "mse_local": mse_local.item(),
+        "var_local": var_local.item(),
+        "cov_local": cov_local.item(),
+    }
+
+
 @torch.no_grad()
 def ema_update(target: torch.nn.Module, online: torch.nn.Module, tau: float) -> None:
     for p_t, p_o in zip(target.parameters(), online.parameters()):
