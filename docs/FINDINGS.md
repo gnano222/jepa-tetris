@@ -783,3 +783,116 @@ trades prediction fidelity for action discrimination, and the trade is most favo
 should be carried forward for downstream control evaluation (M1/M2 improvements should
 help the pure-latent BFS planner; whether film-100k's better cos@16 still wins on
 lines-per-episode is unknown).
+
+---
+
+## Exp-6 — Columnar encoder with local learning: can local losses match global backprop? (2026-05-15)
+
+**Question.** The current CNN encoder shares filter weights across all spatial
+locations and is trained by a single global backprop pass. The neocortex does
+neither — each cortical column has its own independently-plastic synapses, and
+credit assignment is largely local to a column. This experiment drops global
+backprop in the encoder and replaces it with per-column local losses. Can
+locally-trained, independently-plastic columns learn a representation
+competitive with global backprop **at fixed compute**?
+
+**Two things separate a CNN from cortical columns: weight sharing and the
+learning rule.** A 3-way comparison isolates them:
+
+| Run | Weights | Learning rule |
+|---|---|---|
+| film-100k (existing benchmark) | shared | global backprop |
+| **Fork A** | untied (columnar) | global backprop |
+| **Fork B** | untied (columnar) | per-column local loss |
+
+The `film→A` gap is the cost of dropping weight-sharing; the **`A→B` gap is the
+headline** — the cost of dropping global backprop, with architecture held fixed.
+
+**Architecture.** `ColumnarEncoder`: the 20×10 board is partitioned into a 5×3
+grid = 15 columns (tiles 4 rows tall, widths {3,4,3}). Each column has its own
+untied conv stack and reads its tile plus a 1-cell overlap margin (V1-style
+overlapping receptive fields), emitting one 128-d token → (B, 15, 128). In
+Fork B each column also owns a throwaway FiLM predictor head and is trained by
+a per-column single-step JEPA loss + per-column VICReg; gradient isolation
+between columns is automatic (each column's forward touches only its own tile
+and weights). The global FiLM transformer predictor trains on the **detached**
+encoder output — its gradient never couples columns. This is decoupled greedy
+learning (Belilovsky et al.) / Greedy InfoMax (Löwe et al.) applied *spatially*.
+
+**Setup.** Both runs 100k steps, batch 256, FiLM predictor, seed 0, on the
+mixed-exploration buffer. Checkpoints `jepa-forkA-100k.pt`, `jepa-forkB-100k.pt`.
+Compute parity is approximate: Fork B carries 15 small per-column heads
+(<2% of params) and runs the per-column loss in addition to the predictor loss.
+
+**Results — multistep accuracy.**
+
+| metric | film-100k | Fork A | Fork B |
+|---|---|---|---|
+| cos@1 | **0.9983** | 0.9974 | 0.9905 |
+| cos@2 | **0.9961** | 0.9922 | 0.9759 |
+| cos@4 | **0.9891** | 0.9688 | 0.9257 |
+| cos@8 | **0.9708** | 0.9022 | 0.8679 |
+| cos@16 | **0.9309** | 0.7925 | 0.8175 |
+| MSE@1 | 0.0136 | **0.0095** | 0.0595 |
+| DROP MSE@1 | 0.0678 | **0.0491** | 0.3053 |
+
+**Results — action causality.**
+
+| metric | Fork A | Fork B |
+|---|---|---|
+| M1 action retrieval (↑) | **0.9690** | 0.9600 |
+| M2 distance calibration (↑) | **0.9302** | 0.7016 |
+| M4 no-op recognition (↓) | **0.0295** | 0.0506 |
+
+**Conclusions.**
+
+**1. Local learning matches global backprop on representational *direction*.**
+On cosine similarity — the standard JEPA proxy — Fork B is competitive: within
+0.7pp at k=1, ~4pp at k=4–8, and it actually *beats* Fork A at the longest
+horizon (cos@16 0.8175 vs 0.7925). Action retrieval (M1) is nearly tied
+(0.960 vs 0.969). A per-column local loss, with no gradient flowing between
+columns and no global backprop in the encoder, learns latents that point
+where global backprop's point.
+
+**2. Local learning fails to calibrate latent *magnitude*.** Fork B loses
+badly on every magnitude-sensitive metric: MSE@1 is 6× worse (0.0595 vs
+0.0095), DROP MSE@1 is 6× worse (0.305 vs 0.049), and M2 — the rank
+correlation of *pairwise distances* between action outcomes — collapses from
+0.93 to 0.70. The causality diagnostic shows the mechanism directly: Fork B
+predicts the DROP-vs-other pairwise distances at ~26 when the true distances
+are ~35 — it systematically under-predicts the *size* of the largest action
+effect while getting its *direction* roughly right. The per-column local loss
++ per-column VICReg constrains each column's variance and direction but not
+the global scale of the predicted change.
+
+**3. The headline `A→B` verdict is split, not a clean win or loss.** Against
+the success criterion ("competitive peak accuracy at fixed compute"): on
+cosine and action retrieval, **yes** — local learning is competitive, even
+superior at long horizon. On MSE and distance calibration, **no** — global
+backprop's joint objective pins magnitude in a way 15 decoupled local losses
+do not. The cleanest one-line summary: *local per-column learning reproduces
+the geometry of the representation but not its scale.*
+
+**4. The `film→A` gap: untied weights help short-horizon MSE, hurt long-horizon
+cosine.** Fork A beats film-100k on MSE@1 (0.0095 vs 0.0136) and DROP MSE@1
+(0.049 vs 0.068) — 15 untied columns fit local single-step detail better than
+one shared filter — but film-100k is far more stable at long horizon
+(cos@16 0.931 vs 0.793). Weight-sharing acts as a regularizer that pays off
+over long rollouts.
+
+**5. Fork B's cos@16 "win" is direction-only.** Fork B's cos@16 (0.8175) beats
+Fork A's (0.7925), but its MSE@16 is more than 2× worse (1.75 vs 0.80). The
+long-horizon latents drift far in magnitude while staying loosely aligned in
+direction — the win is real but narrow, and consistent with conclusion 2.
+
+**Next.** The clear lever is magnitude. The local loss needs an explicit scale
+constraint — candidates: (a) add a magnitude-matching term to the per-column
+loss (penalize ‖ẑ_c‖ vs ‖z̄_c‖), (b) tune per-column VICReg `target_std`, or
+(c) a cosine + magnitude split loss. The detached-lateral-connection variant
+(Approach 2 from the design) is the other open follow-up — it would test
+whether giving columns *detached* neighbour context closes the non-local
+DROP gap without reintroducing cross-column gradient.
+
+**Benchmark.** film-100k remains the default checkpoint. Fork A and Fork B
+checkpoints are kept as the columnar reference points for the magnitude
+follow-up.
