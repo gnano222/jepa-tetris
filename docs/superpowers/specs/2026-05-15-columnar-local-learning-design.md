@@ -1,6 +1,6 @@
 # Columnar Encoder with Local Learning — Design
 
-*Exp-6. A cortically-inspired encoder where each spatial column has untied
+*Exp-8. A cortically-inspired encoder where each spatial column has untied
 weights and is trained by its own local loss, with no gradient flowing
 between columns.*
 
@@ -150,7 +150,7 @@ Runs 2 and 3 execute on RunPod via the `runpod-training-workflow` skill
 - `scripts/causality_diagnostic.py` — M1/M2/M4.
 
 Headline: peak accuracy at fixed 100k steps, **Fork A vs Fork B**.
-Results written up as **Exp-6 in `docs/FINDINGS.md`**.
+Results written up as **Exp-8 in `docs/FINDINGS.md`**.
 
 ### Known caveats (to record in the writeup)
 

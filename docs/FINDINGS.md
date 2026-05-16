@@ -786,7 +786,7 @@ lines-per-episode is unknown).
 
 ---
 
-## Exp-6 — Columnar encoder with local learning: can local losses match global backprop? (2026-05-15)
+## Exp-8 — Columnar encoder with local learning: can local losses match global backprop? (2026-05-15)
 
 **Question.** The current CNN encoder shares filter weights across all spatial
 locations and is trained by a single global backprop pass. The neocortex does

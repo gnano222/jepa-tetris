@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `ColumnarEncoder` with untied per-column conv stacks and a per-column local-loss training path, so Exp-6 can compare local learning against global backprop at fixed compute.
+**Goal:** Add a `ColumnarEncoder` with untied per-column conv stacks and a per-column local-loss training path, so Exp-8 can compare local learning against global backprop at fixed compute.
 
 **Architecture:** 15 spatial columns (5×3 grid over the 20×10 board), each an independent conv stack with an overlapping receptive field. Fork B trains each column with its own single-step JEPA loss via a throwaway per-column predictor head; the global FiLM transformer predictor trains on the *detached* encoder output. Fork A reuses the same encoder under standard global backprop.
 
@@ -624,9 +624,9 @@ python scripts/multistep_accuracy.py --jepa <ckpt> --buffer <data>
 python scripts/causality_diagnostic.py --jepa <ckpt> --buffer <data>
 ```
 
-- [ ] **Step 4: Write up Exp-6 in FINDINGS.md**
+- [ ] **Step 4: Write up Exp-8 in FINDINGS.md**
 
-Append an `## Exp-6` section to `docs/FINDINGS.md` following the existing experiment-log format: question, setup table, the 3-way results table (film-100k / Fork A / Fork B) for cos@k, MSE@k, DROP MSE, M1/M2/M4, and conclusions on the `A→B` gap. Commit.
+Append an `## Exp-8` section to `docs/FINDINGS.md` following the existing experiment-log format: question, setup table, the 3-way results table (film-100k / Fork A / Fork B) for cos@k, MSE@k, DROP MSE, M1/M2/M4, and conclusions on the `A→B` gap. Commit.
 
 ---
 
@@ -641,7 +641,7 @@ Append an `## Exp-6` section to `docs/FINDINGS.md` following the existing experi
 - Checkpoint reconstruction → Task 2 ✓
 - Tests: shape, edge clamping, gradient isolation, decoupling, args round-trip → Tasks 1–3 ✓
   (Decoupling is covered structurally: Task 4 Step 4 detaches `z_in` before the predictor; the gradient-isolation test in Task 1 plus the explicit `.detach()` make a separate decoupling unit test redundant. The Task 5 Fork B smoke run exercises the full detached path.)
-- 3-way experiment, RunPod, Exp-6 writeup → Task 6 ✓
+- 3-way experiment, RunPod, Exp-8 writeup → Task 6 ✓
 
 **Placeholder scan:** No TBD/TODO; every code step has complete code. Buffer path in Tasks 5–6 is intentionally substituted at runtime (the exact filename depends on what exists in `data/`).
 
