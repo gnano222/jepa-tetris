@@ -783,3 +783,121 @@ trades prediction fidelity for action discrimination, and the trade is most favo
 should be carried forward for downstream control evaluation (M1/M2 improvements should
 help the pure-latent BFS planner; whether film-100k's better cos@16 still wins on
 lines-per-episode is unknown).
+
+---
+
+## Exp-7 — Sparse-change prior: group-lasso on the predictor's Δz (2026-05-16)
+
+**Question.** A human presses a Tetris button once and instantly knows what it
+does; the JEPA needs ~100k steps. A domain-general principle from how the brain
+builds world models: the change between two moments is *sparse and local* — the
+cortex represents the world in factored parts, and an action touches few of them.
+Does penalising the predictor's change vector toward block-sparsity make the
+encoder+predictor learn the action→effect map in fewer steps?
+
+**Method.** New loss term: a group-lasso on `Δ = ẑ′ − z` (the predictor's change;
+with `residual=True` this is the `delta` it already computes). The D=128 channels
+are split into G=16 groups of 8; the penalty is the sum of per-group L2 norms,
+which drives whole groups to exactly zero. Total loss
+`L = L_pred + var + cov + λ·L_sparse`; λ=0 reproduces film-100k exactly. Flags
+`--sparse-change-weight` / `--sparse-change-groups`. Design spec:
+[docs/superpowers/specs/2026-05-15-sparse-change-prior-design.md](superpowers/specs/2026-05-15-sparse-change-prior-design.md).
+
+**Setup.** Two runs identical to the film-100k benchmark (two-scale N=21 encoder,
+FiLM predictor, 100k steps, batch 256, no AR loss, seed 0, `data/buffer.npz`) —
+only λ changes. λ ∈ {0.01, 0.10}; film-100k is the λ=0 anchor.
+
+> **Infrastructure caveat.** A stale `JEPA_OUT=checkpoints/jepa.pt` /
+> `JEPA_RUN=run01` in `.env.runpod` overrode the per-branch checkpoint paths, so
+> both parallel pods wrote `jepa_step*.pt` and the final `jepa.pt` to the *same*
+> shared-volume paths and raced. The intermediate step-checkpoint series is
+> mixed/overwritten and unusable for the planned convergence curve; the surviving
+> `checkpoints/jepa.pt` is the λ=0.10 final model (confirmed via stored args).
+> What survived intact and attributable: each run's `train_log.jsonl`,
+> `train_args.json`, and `multistep_accuracy.json` (written to distinct
+> timestamped result dirs; the post-training eval used the in-memory model).
+> Causality (M1/M2/M4) is therefore available for λ=0.10 only.
+
+**Results — final multistep accuracy (held-out, n=2000).**
+
+| metric | film-100k (λ=0) | λ=0.01 | λ=0.10 |
+|---|---|---|---|
+| cos@1 | **0.9983** | 0.9958 | 0.9932 |
+| cos@4 | **0.9891** | 0.9671 | 0.9731 |
+| cos@8 | **0.9708** | 0.9380 | 0.9513 |
+| cos@16 | **0.9309** | 0.8968 | 0.9178 |
+| MSE@1 | **0.0136** | 0.0329 | 0.0576 |
+| DROP MSE@1 | **0.0678** | 0.1715 | 0.3056 |
+| DROP cos@1 | **0.9917** | 0.9787 | 0.9640 |
+
+**Results — per-action active groups @ k=1 (out of 16; the diagnostic).**
+
+| run | LEFT | RIGHT | ROTATE | DROP |
+|---|---|---|---|---|
+| λ=0.01 | 0.0 | 0.0 | 0.0 | 16.0 |
+| λ=0.10 | 0.0 | 0.0 | 0.0 | 0.0 |
+
+**Results — causality (λ=0.10 only, n=500).** M1 = **0.277** (film-100k: 0.983);
+M2 = **0.436** (film-100k: 0.954); M4 deltas both 0.0000 (predictor is the
+identity). Per-action M1: LEFT 0.86, RIGHT 0.06, ROTATE 0.18, DROP 0.006.
+
+**Results — training trajectory (`active_groups`, batch-averaged).** λ=0.01:
+16.0 held through step 25k, then 14.4 (50k) → 2.95 (75k) → 3.08 (100k). λ=0.10:
+16.0 → 11.9 (50k) → 0.0 (75k) → 0.0. The collapse happens between steps 50k and
+75k in both runs. At every milestone film-100k's MSE leads (e.g. step 25k: film
+0.021, λ=0.01 0.033, λ=0.10 0.045) — there is no convergence speed-up at any point.
+
+**Conclusions.**
+
+**1. Negative result — the hypothesis is not supported.** Both λ are worse than
+film-100k on every prediction metric, and neither converges faster. The
+sparse-change prior, as formulated, harms the model.
+
+**2. λ=0.10 collapsed to a pure identity predictor.** `active_groups → 0` for
+*every* action including DROP, `sparse_loss → 1.4e-7`, `z_pred_std` frozen at
+0.8033 across all rollout horizons (the predictor outputs `ẑ′ = z` unconditionally),
+and M1 = 0.277 ≈ the 0.25 random baseline. Action causality is destroyed: the
+penalty won outright and the model stopped predicting change at all.
+
+**3. λ=0.01 induced a *selective* action collapse.** Movement actions
+(LEFT/RIGHT/ROTATE) dropped to 0.0 active groups — the predictor outputs `Δ ≈ 0`
+for them — while DROP kept all 16. Movement MSE@1 stayed low (~0.001, equal to
+film-100k) **but for the wrong reason**: the true latent change under movement is
+already tiny (~0.001 MSE), so outputting `Δ = 0` costs almost no MSE. The cost is
+hidden — `ẑ_LEFT = ẑ_RIGHT = ẑ_ROTATE = z` makes the three movement actions
+*indistinguishable*, which collapses action retrieval exactly the way M1 (not
+cosine) is designed to catch.
+
+**4. The core design flaw: group-lasso penalises change by *magnitude*, but
+causal importance is not magnitude.** Soft-thresholding kills the smallest groups
+first. In Tetris, moving the piece has a small latent footprint but is causally
+crucial; DROP has a large footprint. So the penalty sparsified away precisely the
+*small-but-important* movement signal and spared the large DROP signal —
+backwards. The brain principle ("actions cause sparse, localised change") may be
+sound; the operationalisation ("penalise the L2 magnitude of Δz") is not, because
+it conflates "small" with "discardable."
+
+**5. λ=0.10 "beating" λ=0.01 at cos@8/16 is an artefact.** An identity predictor
+never drifts, so it scores well on long-horizon cosine by predicting nothing —
+the exact failure mode cosine-as-proxy is blind to (cf. §2). Read M1 and MSE, not
+cos@k, for these runs.
+
+**6. Why the encoder did not resist.** The JEPA loss is entirely in latent space,
+so the encoder is free to choose any geometry (cf. CF study §1). The sparse
+penalty added a pressure whose cheapest solution — zero movement change — is
+reachable without the prediction loss objecting, because movement's true latent
+change is small. No λ in this family avoids the basin; this is a redesign, not a
+tuning problem.
+
+**Next.** If the idea is pursued: (a) stop-gradient the encoder from the sparse
+term so it penalises only the predictor's expression of change, not the latent
+geometry; (b) weight the penalty by causal *relevance* rather than magnitude
+(e.g. normalise each group's change by its typical scale, so small movement
+changes are not preferentially killed); or (c) anchor the encoder with a
+decoder/reconstruction term so it cannot discard piece position. All three are
+design changes, not a re-sweep. The infrastructure bug should be fixed (drop the
+stale `JEPA_OUT`/`JEPA_RUN` from `.env.runpod`) before any parallel re-run; a
+clean re-run would also recover λ=0.01's M1/M2/M4.
+
+**Benchmark.** film-100k remains the default checkpoint on every metric. Exp-7 is
+a negative result; no checkpoint is carried forward.

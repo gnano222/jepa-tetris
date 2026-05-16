@@ -150,19 +150,22 @@ so direction is the more semantically meaningful axis to fit. Worth a
 one-flag A/B on `cos_sim_k4` and per-action separation under counterfactual
 training. Generalizes to any latent shape — no Tetris-specific assumptions.
 
-### Sparse-change prior ⬅ IN PROGRESS (Exp-6)
-The predictor remaps the *entire* latent every step under a uniform MSE,
-spending equal capacity on the ~95% of the representation that didn't
-change and the ~5% that did. A domain-general principle from how the brain
-builds world models: the change between two moments is **sparse and local**
-— the cortex represents the world in factored parts, and an action touches
-few of them. A group-lasso penalty on the predictor's change vector
-`Δ = ẑ' − z` (channels split into G groups; sum of per-group L2 norms)
-drives whole channel-groups to zero, shrinking the predictor's effective
-hypothesis space and pressuring a factored latent. Tested as a
-*convergence-speed* intervention against film-100k. See
-[spec](superpowers/specs/2026-05-15-sparse-change-prior-design.md);
-`--sparse-change-weight` / `--sparse-change-groups` flags.
+### ~~Sparse-change prior~~ ❌ TESTED — REGRESSION (Exp-7)
+A group-lasso penalty on the predictor's change vector `Δ = ẑ' − z`
+(channels split into G groups; sum of per-group L2 norms) was meant to
+shrink the predictor's hypothesis space and pressure a factored latent.
+It backfired: see [FINDINGS.md — Exp-7](FINDINGS.md). Group-lasso kills the
+*smallest-magnitude* groups first, and in Tetris movement has a small
+latent footprint but is causally crucial — so the penalty zeroed the
+movement signal (`ẑ_LEFT = ẑ_RIGHT = ẑ_ROTATE = z`, action retrieval
+collapsed) while sparing the large DROP change. At λ=0.10 the predictor
+became the pure identity map (M1 0.98→0.28). The brain principle (actions
+cause sparse, local change) may hold; penalising change *magnitude* is the
+wrong operationalisation — it conflates "small" with "discardable." Open
+redesigns if revisited: stop-grad the encoder from the sparse term;
+weight the penalty by causal relevance not magnitude; or anchor the
+encoder with a reconstruction term. Flags `--sparse-change-weight` /
+`--sparse-change-groups` remain in `train.py` (default 0 = off).
 
 ### Surprise-gated loss
 The brain learns from prediction *error* — plasticity is gated by
