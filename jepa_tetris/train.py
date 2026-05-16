@@ -54,6 +54,30 @@ def covariance_loss(z: torch.Tensor) -> torch.Tensor:
     return off_diag_sq / d
 
 
+def sparse_change_loss(
+    delta: torch.Tensor, groups: int, active_eps: float = 1e-3
+) -> tuple[torch.Tensor, float]:
+    """Group-lasso penalty on the predictor's change vector Δ = ẑ' − z.
+
+    The channel dim D is split into `groups` contiguous blocks; the penalty is
+    the sum of per-group L2 norms (a group lasso), which drives whole channel
+    groups to exactly zero rather than shrinking individual dimensions. The
+    same block partition applies to every token, so the encoder is pressured
+    to place each semantic factor in a fixed channel block, and a token the
+    action does not touch contributes ~0 from every group.
+
+    delta: (..., D) — any leading shape; D must be divisible by `groups`.
+    Returns (scalar penalty, mean active-group-per-token count diagnostic).
+    """
+    D = delta.shape[-1]
+    g = delta.reshape(*delta.shape[:-1], groups, D // groups)   # (..., G, D/G)
+    group_norm = torch.linalg.vector_norm(g, dim=-1)            # (..., G)
+    penalty = group_norm.sum(dim=-1).mean()                     # Σ over G, mean rest
+    with torch.no_grad():
+        active = (group_norm > active_eps).float().sum(dim=-1).mean().item()
+    return penalty, active
+
+
 def counterfactual_step_loss(
     *,
     s0: torch.Tensor,
@@ -233,6 +257,14 @@ def main():
                         help="Fork B: train the columnar encoder with per-column local "
                              "losses; the global predictor trains on the detached encoder "
                              "output. Requires --encoder-columnar.")
+    parser.add_argument("--sparse-change-weight", type=float, default=0.0,
+                        help="Weight λ on the sparse-change prior: a group-lasso "
+                             "penalty on the predictor's change vector Δ = ẑ' − z. "
+                             "0 = off (default, reproduces the unmodified loss). "
+                             "Teacher-forced path only.")
+    parser.add_argument("--sparse-change-groups", type=int, default=16,
+                        help="Number of channel groups for the sparse-change "
+                             "group lasso. Must divide patch_dim.")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -240,6 +272,8 @@ def main():
         parser.error("--local-loss requires --encoder-columnar")
     if args.local_loss and args.counterfactual:
         parser.error("--local-loss is incompatible with --counterfactual")
+    if args.sparse_change_weight > 0 and args.patch_dim % args.sparse_change_groups != 0:
+        parser.error("--sparse-change-groups must divide --patch-dim")
 
     if args.log_file is None:
         log_path = run_dir(args.run) / "train_log.jsonl"
@@ -318,6 +352,8 @@ def main():
     pbar = tqdm(range(args.steps), desc="train")
     for step in pbar:
         log_now = (step % args.log_every == 0)
+        sparse_loss_val = None
+        active_groups_val = None
         if args.counterfactual:
             mse_tf_val = None
             mse_ar_val = None
@@ -523,6 +559,15 @@ def main():
             cov_loss = covariance_loss(z_all)
             loss = mse + args.var_weight * var_loss + args.cov_weight * cov_loss
 
+            if args.sparse_change_weight > 0 and not args.autoregressive:
+                # Sparse-change prior: group-lasso on Δ = ẑ' − z (teacher-forced).
+                delta = z_pred - z_all[:, :H]
+                sparse_pen, active_groups_val = sparse_change_loss(
+                    delta, args.sparse_change_groups
+                )
+                sparse_loss_val = sparse_pen.item()
+                loss = loss + args.sparse_change_weight * sparse_pen
+
             # Per-step cos_sim logging (first/last step in the H window).
             z_pred_log = z_pred[:, 0]
             z_target_log = z_target[:, 0]
@@ -577,6 +622,9 @@ def main():
                 record["mse_ar"] = mse_ar_val
             if args.local_loss:
                 record["mse_local"] = _local_mse_log
+            if sparse_loss_val is not None:
+                record["sparse_loss"] = sparse_loss_val
+                record["active_groups"] = active_groups_val
             logger.log(record)
             pbar.set_postfix(loss=f"{loss.item():.4f}", z_std=f"{z_std_mean:.3f}")
 
@@ -622,16 +670,31 @@ def main():
         _std_list: list[float] = []
         _pa_cos_k1: dict[str, float] = {}
         _pa_mse_k1: dict[str, float] = {}
+        _pa_active_k1: dict[str, float] = {}
 
         encoder.eval()
         action_encoder.eval()
         predictor.eval()
 
         with torch.no_grad():
-            _z_pred = encoder(_s0)
+            _z0 = encoder(_s0)
+            _z_pred = _z0
             for _t in range(_max_h):
                 _k = _t + 1
                 _z_pred = predictor(_z_pred, action_encoder(_actions[:, _t]))
+                if _k == 1:
+                    # Per-action active-group count on Δ = ẑ' − z at k=1.
+                    _gG = args.sparse_change_groups
+                    _d1 = _z_pred - _z0                                   # (B, N, D)
+                    if _d1.shape[-1] % _gG == 0:
+                        _dg = _d1.reshape(*_d1.shape[:-1], _gG, -1)
+                        _gn = torch.linalg.vector_norm(_dg, dim=-1)       # (B, N, G)
+                        _agp = (_gn > 1e-3).float().sum(-1).mean(-1).cpu().numpy()  # (B,)
+                        for _ai, _name in enumerate(_ACTION_NAMES):
+                            _idx = np.where(_a0_np == _ai)[0]
+                            _pa_active_k1[_name] = (
+                                float(_agp[_idx].mean()) if _idx.size > 0 else float("nan")
+                            )
                 if _k not in _h_set:
                     continue
                 _z_tgt = encoder(_s_next_k[:, _t])
@@ -655,6 +718,8 @@ def main():
             "z_pred_std": _std_list,
             "per_action_cos_sim_k1": _pa_cos_k1,
             "per_action_mse_k1": _pa_mse_k1,
+            "per_action_active_groups_k1": _pa_active_k1,
+            "sparse_change_groups": args.sparse_change_groups,
             "n": _eval_n,
             "buffer": args.buffer,
             "jepa": args.out,

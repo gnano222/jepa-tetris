@@ -150,6 +150,35 @@ so direction is the more semantically meaningful axis to fit. Worth a
 one-flag A/B on `cos_sim_k4` and per-action separation under counterfactual
 training. Generalizes to any latent shape — no Tetris-specific assumptions.
 
+### Sparse-change prior ⬅ IN PROGRESS (Exp-6)
+The predictor remaps the *entire* latent every step under a uniform MSE,
+spending equal capacity on the ~95% of the representation that didn't
+change and the ~5% that did. A domain-general principle from how the brain
+builds world models: the change between two moments is **sparse and local**
+— the cortex represents the world in factored parts, and an action touches
+few of them. A group-lasso penalty on the predictor's change vector
+`Δ = ẑ' − z` (channels split into G groups; sum of per-group L2 norms)
+drives whole channel-groups to zero, shrinking the predictor's effective
+hypothesis space and pressuring a factored latent. Tested as a
+*convergence-speed* intervention against film-100k. See
+[spec](superpowers/specs/2026-05-15-sparse-change-prior-design.md);
+`--sparse-change-weight` / `--sparse-change-groups` flags.
+
+### Surprise-gated loss
+The brain learns from prediction *error* — plasticity is gated by
+neuromodulators that turn the learning rate up for surprising or important
+events and down for routine ones. JEPA training instead weights every
+transition equally, so the rarest, most state-changing transitions (line
+clears: ~0.5% of the buffer; see Data §"event-poor") are drowned out — a
+plausible contributor to DROP prediction being ~50× harder than movement
+(Exp-4). A cheap, domain-general fix: weight each transition's loss by its
+prediction error, or by how much the state actually changed (latent-space
+displacement `‖z' − z‖`). This rebalances *which transitions* the model
+learns from — complementary to the sparse-change prior, which rebalances
+*which dimensions*. Best evaluated as a one-flag A/B once Exp-6 lands, so
+the two interventions are not confounded. Generalizes to any task — no
+Tetris-specific assumptions.
+
 ### Depth and head count
 Default is `depth=2, heads=4`. With only 7 tokens and a 128-d model, this
 is plenty of capacity, but it's untuned.
