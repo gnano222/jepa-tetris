@@ -222,8 +222,24 @@ def main():
     parser.add_argument("--encoder-two-scale", action="store_true",
                         help="Concat fine (15) + coarse (6) patch streams → N=21. "
                              "Requires --encoder-stride-stages 2.")
+    parser.add_argument("--encoder-columnar", action="store_true",
+                        help="Use ColumnarEncoder (untied per-column conv stacks) "
+                             "instead of StateEncoder. N=15 for the default 5x3 grid.")
+    parser.add_argument("--encoder-columnar-grid", default="5x3",
+                        help="Columnar grid as 'GRxGC' (default 5x3 -> 15 columns).")
+    parser.add_argument("--encoder-columnar-margin", type=int, default=1,
+                        help="Overlap margin in cells for each column's receptive field.")
+    parser.add_argument("--local-loss", action="store_true",
+                        help="Fork B: train the columnar encoder with per-column local "
+                             "losses; the global predictor trains on the detached encoder "
+                             "output. Requires --encoder-columnar.")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+
+    if args.local_loss and not args.encoder_columnar:
+        parser.error("--local-loss requires --encoder-columnar")
+    if args.local_loss and args.counterfactual:
+        parser.error("--local-loss is incompatible with --counterfactual")
 
     if args.log_file is None:
         log_path = run_dir(args.run) / "train_log.jsonl"
@@ -243,13 +259,22 @@ def main():
     if buf.size < args.batch_size:
         raise ValueError(f"buffer too small ({buf.size}) for batch_size ({args.batch_size})")
 
-    encoder = StateEncoder(
-        patch_dim=args.patch_dim,
-        residual_blocks=args.encoder_residual_blocks,
-        aux_channels=args.encoder_aux_channels,
-        stride_stages=args.encoder_stride_stages,
-        two_scale=args.encoder_two_scale,
-    ).to(device)
+    if args.encoder_columnar:
+        from jepa_tetris.models.encoder import ColumnarEncoder
+        gr, gc = (int(v) for v in args.encoder_columnar_grid.lower().split("x"))
+        encoder = ColumnarEncoder(
+            patch_dim=args.patch_dim,
+            grid=(gr, gc),
+            margin=args.encoder_columnar_margin,
+        ).to(device)
+    else:
+        encoder = StateEncoder(
+            patch_dim=args.patch_dim,
+            residual_blocks=args.encoder_residual_blocks,
+            aux_channels=args.encoder_aux_channels,
+            stride_stages=args.encoder_stride_stages,
+            two_scale=args.encoder_two_scale,
+        ).to(device)
     target_encoder = copy.deepcopy(encoder).to(device)
     for p in target_encoder.parameters():
         p.requires_grad_(False)
@@ -266,11 +291,20 @@ def main():
         cross_attn=args.predictor_cross_attn,
     ).to(device)
 
+    column_heads = None
+    if args.local_loss:
+        from jepa_tetris.models.encoder import ColumnPredictorHead
+        column_heads = torch.nn.ModuleList(
+            [ColumnPredictorHead(args.patch_dim) for _ in range(encoder.num_patches)]
+        ).to(device)
+
     params = (
         list(encoder.parameters())
         + list(action_encoder.parameters())
         + list(predictor.parameters())
     )
+    if column_heads is not None:
+        params += list(column_heads.parameters())
     optimizer = AdamW(params, lr=args.lr)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.steps)
 
@@ -379,6 +413,54 @@ def main():
             var_loss = variance_loss(z_for_vic, target_std=args.target_std)
             cov_loss = covariance_loss(z_for_vic)
             loss = mse + args.var_weight * var_loss + args.cov_weight * cov_loss
+        elif args.local_loss:
+            batch = buf.sample_rollout(args.batch_size, H, rng=rng)
+            s0 = torch.from_numpy(batch["s0"]).to(device)              # (B, *state)
+            actions = torch.from_numpy(batch["actions"]).to(device)    # (B, H)
+            s_next_k = torch.from_numpy(batch["s_next_k"]).to(device)  # (B, H, *state)
+            B = s0.shape[0]
+
+            frames = torch.cat([s0.unsqueeze(1), s_next_k], dim=1)     # (B, H+1, *state)
+            frames_flat = frames.reshape(B * (H + 1), *state_shape)
+
+            z_all_flat = encoder(frames_flat)                          # (B*(H+1), N, D)
+            N, D = z_all_flat.shape[1], z_all_flat.shape[2]
+            z_all = z_all_flat.view(B, H + 1, N, D)
+            with torch.no_grad():
+                z_target = target_encoder(
+                    frames[:, 1:].reshape(B * H, *state_shape)
+                ).view(B, H, N, D)
+
+            # --- Fork B encoder signal: per-column single-step local loss ---
+            local_loss, local_parts = columnar_local_loss(
+                z0_online=z_all[:, 0],
+                z1_target=z_target[:, 0],
+                a_emb=action_encoder(actions[:, 0]),
+                column_heads=column_heads,
+                var_weight=args.var_weight,
+                cov_weight=args.cov_weight,
+                target_std=args.target_std,
+            )
+
+            # --- Global predictor: teacher-forced H on the DETACHED encoder out ---
+            z_in = z_all[:, :H].detach().reshape(B * H, N, D)
+            a_emb_tf = action_encoder(actions.reshape(B * H))
+            z_pred = predictor(z_in, a_emb_tf).view(B, H, N, D)
+            mse_tf = F.mse_loss(z_pred, z_target)
+
+            mse = mse_tf
+            mse_tf_val = mse_tf.item()
+            mse_ar_val = None
+            loss = local_loss + mse_tf
+            var_loss = z_all.new_tensor(local_parts["var_local"])
+            cov_loss = z_all.new_tensor(local_parts["cov_local"])
+
+            z_pred_log = z_pred[:, 0]
+            z_target_log = z_target[:, 0]
+            z_pred_last = z_pred[:, -1]
+            z_target_last = z_target[:, -1]
+            z_for_vic = z_all
+            _local_mse_log = local_parts["mse_local"]
         else:
             batch = buf.sample_rollout(args.batch_size, H, rng=rng)
             s0 = torch.from_numpy(batch["s0"]).to(device)              # (B, *state)
@@ -493,6 +575,8 @@ def main():
                 record[key] = mse_tf_val
             if mse_ar_val is not None:
                 record["mse_ar"] = mse_ar_val
+            if args.local_loss:
+                record["mse_local"] = _local_mse_log
             logger.log(record)
             pbar.set_postfix(loss=f"{loss.item():.4f}", z_std=f"{z_std_mean:.3f}")
 
