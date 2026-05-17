@@ -6,11 +6,14 @@ those checkpoints and collects the results into a single JSON keyed by
 training step — the data behind a "metric vs. training steps" plot used to
 judge whether one model converges faster than another.
 
+Intermediate checkpoints are named `<out-stem>_step{N}.pt` (e.g.
+`jepa-exp-tokengate-k6_step5000.pt`), so a glob targets one run cleanly.
+
 Usage:
     python scripts/convergence_curve.py \\
-        --checkpoints "checkpoints/jepa_step*.pt" \\
+        --checkpoints "checkpoints/jepa-exp-tokengate-k6_step*.pt" \\
         --buffer data/buffer.npz \\
-        --out results/sparse_lam01_curve.json
+        --out results/tokengate_k6_curve.json
 """
 from __future__ import annotations
 

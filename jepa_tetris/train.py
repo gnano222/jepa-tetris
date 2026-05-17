@@ -660,8 +660,10 @@ def main():
             pbar.set_postfix(loss=f"{loss.item():.4f}", z_std=f"{z_std_mean:.3f}")
 
         if step > 0 and step % args.ckpt_every == 0:
+            # Name intermediate checkpoints after --out's stem so parallel runs
+            # sharing a checkpoints/ dir (e.g. one network volume) never collide.
             save_checkpoint(
-                Path(args.out).parent / f"jepa_step{step}.pt",
+                Path(args.out).with_name(f"{Path(args.out).stem}_step{step}.pt"),
                 step=step,
                 encoder=encoder,
                 target_encoder=target_encoder,
