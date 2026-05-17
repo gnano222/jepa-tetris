@@ -97,6 +97,26 @@ rows and columns at the same rate. Asymmetric strides (compress rows faster)
 or column-wise pooling would preserve column structure longer. This flag
 was removed in the V2 simplification — bring it back if width matters.
 
+### Object-centric / slot encoder
+The current encoder describes the board by a *fixed grid* of patch tokens
+(N=21). A more brain-aligned factorisation describes it by *things*: a
+slot-attention encoder emits a small set of "slots" that compete to each
+claim one entity in the scene — one slot latches onto the falling piece,
+others onto regions of the settled pile. The payoff is that sparse change
+becomes *automatic*: an action updates the piece slot and leaves the pile
+slots untouched, with no gate or penalty needed — the factorisation itself
+carries the inductive bias. This is also the most general direction (for
+computer-use the "things" become windows, buttons, icons; a click affects
+one). It is the natural follow-up to the token-gated predictor (Exp-8): if
+a *fixed-grid* gate proves too crude to pin down what each action touches,
+that failure is the evidence that genuine object slots are needed.
+
+Cost / risk: a full encoder rewrite; Slot Attention is notoriously fiddly
+to train stably; and Tetris has only ~2 entities (piece + pile), so the
+machinery may be heavy relative to the payoff *on this task* — its value
+shows most on scenes with many objects. Sequencing: pursue after the
+token-gated predictor result is in.
+
 ## Predictor (`jepa_tetris/models/predictor.py`)
 
 V2 is a 2-layer transformer with `residual=True` by default (predicts Δz).
