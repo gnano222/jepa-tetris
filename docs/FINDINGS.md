@@ -1015,3 +1015,102 @@ patch-count event.
 **Benchmark.** film-100k remains the default checkpoint on every metric. Exp-8 is
 a negative result; no checkpoint is carried forward. The token-gate flags
 (`--predictor-token-gate`, `--token-gate-k`, default off) remain in `train.py`.
+
+---
+
+## Exp-9 — Columnar encoder with local learning: untied per-column weights + per-column local losses (2026-05-17)
+
+**Question.** The CNN encoder does two things the neocortex does not: it
+*shares* filter weights across all spatial locations, and it trains by one
+*global* backprop pass. A cortical column has its own independently-plastic
+synapses, and credit assignment is largely local to a column. Can a columnar
+encoder — untied per-column conv stacks, each trained by its own local loss
+with no gradient flowing between columns — learn a representation competitive
+with global backprop?
+
+**Method.** New `ColumnarEncoder`: the 20×10 board is partitioned into a 5×3
+grid = 15 columns (tiles 4 rows tall, widths {3,4,3}); each column is its own
+untied conv stack reading its tile plus a 1-cell overlap margin (V1-style
+overlapping receptive fields), emitting one 128-d token → (B, 15, 128). In the
+local-loss variant each column also owns a throwaway FiLM predictor head and is
+trained by a per-column single-step JEPA loss + per-column VICReg; gradient
+isolation between columns is automatic (each column's forward touches only its
+own tile and weights). The global FiLM transformer predictor trains on the
+**detached** encoder output — decoupled greedy learning / Greedy InfoMax applied
+*spatially*. Design spec:
+[docs/superpowers/specs/2026-05-15-columnar-local-learning-design.md](superpowers/specs/2026-05-15-columnar-local-learning-design.md).
+
+**Setup.** Two things separate a CNN from cortical columns — weight sharing and
+the learning rule — so a 3-way comparison isolates them: **film-100k** (shared
+weights, global backprop), **Fork A** (`--encoder-columnar`: untied columns,
+global backprop), **Fork B** (`--encoder-columnar --local-loss`: untied columns,
+per-column local loss). Forks A and B: 100k steps, batch 256, FiLM predictor,
+seed 0, `data/buffer.npz`. Checkpoints `jepa-forkA-100k.pt`, `jepa-forkB-100k.pt`.
+
+**Results — multistep accuracy (held-out, n=2000).**
+
+| metric | film-100k (shared, global BP) | Fork A (untied, global BP) | Fork B (untied, local loss) |
+|---|---|---|---|
+| cos@1 | **0.9983** | 0.9974 | 0.9905 |
+| cos@2 | **0.9961** | 0.9922 | 0.9759 |
+| cos@4 | **0.9891** | 0.9688 | 0.9257 |
+| cos@8 | **0.9708** | 0.9022 | 0.8679 |
+| cos@16 | **0.9309** | 0.7925 | 0.8175 |
+| MSE@1 | 0.0136 | **0.0095** | 0.0595 |
+| DROP MSE@1 | 0.0678 | **0.0491** | 0.3053 |
+
+**Results — action causality (n=500).**
+
+| metric | Fork A | Fork B |
+|---|---|---|
+| M1 action retrieval (↑) | **0.9690** | 0.9600 |
+| M2 distance calibration (↑) | **0.9302** | 0.7016 |
+| M4 no-op recognition (↓) | **0.0295** | 0.0506 |
+
+**Conclusions.**
+
+**1. Non-starter — and the columnar architecture regresses before local
+learning is even introduced.** Neither fork beats film-100k. Critically, even
+**Fork A** — untied columns trained by ordinary *global backprop* — loses to
+shared-weight film-100k at long horizon (cos@16 0.79 vs 0.93). Dropping
+weight-sharing forfeits a regularizer that pays off over long rollouts. The
+columnar architecture caps the ceiling below film-100k regardless of the
+learning rule, so the experiment fails its success criterion (competitive peak
+accuracy at fixed compute) on the architecture alone.
+
+**2. Local learning reproduces representational *direction* but not
+*magnitude*.** Fork B is competitive on cosine (within 0.7pp at k=1, and it even
+edges Fork A at k=16) and on action retrieval (M1 0.960 vs 0.969). But it
+collapses on every magnitude-sensitive metric: MSE@1 6× worse (0.0595 vs
+0.0095), DROP MSE@1 6× worse (0.305 vs 0.049), and M2 distance calibration falls
+0.93→0.70. The causality diagnostic shows the mechanism directly — Fork B
+predicts DROP's pairwise effect at distance ~26 when the truth is ~35: right
+direction, wrong scale. The per-column local loss + per-column VICReg pins each
+column's direction and variance but not the global magnitude of predicted
+change.
+
+**3. Fork B's cos@16 "edge" is direction-only.** Fork B's cos@16 (0.8175) beats
+Fork A's (0.7925), but its MSE@16 is more than 2× worse — the long-horizon
+latents drift far in magnitude while staying loosely aligned in direction. Read
+MSE and M2, not cos@k, for these runs (cf. the cosine-blindness noted in the CF
+study, Exp-7, Exp-8).
+
+**4. A magnitude fix could rescue Fork B's calibration but not the verdict.**
+Adding an explicit scale term to the local loss (penalise ‖ẑ_c‖ vs ‖z̄_c‖, or
+tune per-column VICReg `target_std`) would likely close the magnitude gap — but
+the best it could reach is Fork A, which is *itself* behind film-100k. The
+branch does not lead anywhere on this task: weight-sharing wins.
+
+**5. The one finding worth keeping.** Local, per-column credit assignment — no
+gradient between columns, no global backprop in the encoder — reproduces the
+*geometry* of a learned representation (direction, action-retrieval structure)
+but not its *scale*. This is consistent with VICReg shaping variance and
+direction while leaving global magnitude unconstrained. If local learning is
+revisited (for biological plausibility or training-memory reasons), the local
+objective needs an explicit magnitude constraint — direction alone is not
+enough.
+
+**Benchmark.** film-100k remains the default checkpoint on every metric. Exp-9
+is a non-starter; no checkpoint is carried forward. Flags `--encoder-columnar`,
+`--encoder-columnar-grid`, `--encoder-columnar-margin`, `--local-loss` remain in
+`train.py` (default off).

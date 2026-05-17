@@ -97,6 +97,26 @@ rows and columns at the same rate. Asymmetric strides (compress rows faster)
 or column-wise pooling would preserve column structure longer. This flag
 was removed in the V2 simplification — bring it back if width matters.
 
+### ~~Columnar encoder + local learning~~ ❌ TESTED — NON-STARTER (Exp-9)
+A cortically-inspired encoder: the board split into a 5×3 grid of 15 *untied*
+per-column conv stacks (overlapping receptive fields), each trained by its own
+per-column local loss with **no gradient between columns** — decoupled greedy
+learning / Greedy InfoMax applied spatially, with the global predictor trained
+on the detached encoder output. See [FINDINGS.md — Exp-9](FINDINGS.md).
+Non-starter on two counts. (1) Untied per-column weights regress the
+*architecture* before local learning is even introduced: Fork A (untied
+columns, ordinary global backprop) loses to shared-weight film-100k at long
+horizon (cos@16 0.79 vs 0.93) — weight-sharing is a regularizer worth keeping.
+(2) The local-loss variant (Fork B) matches global backprop on representational
+*direction* (cosine, M1 action retrieval 0.96 vs 0.97) but not *magnitude* —
+MSE and DROP MSE 6× worse, M2 distance calibration collapses 0.93→0.70. The
+per-column local loss + per-column VICReg pins direction and variance but not
+global scale. The one finding worth keeping: local credit assignment reproduces
+the *geometry* of a representation but not its *scale*; if revisited, the local
+objective needs an explicit magnitude constraint. Flags `--encoder-columnar`,
+`--encoder-columnar-grid`, `--encoder-columnar-margin`, `--local-loss` remain in
+`train.py` (default off).
+
 ### Object-centric / slot encoder
 The current encoder describes the board by a *fixed grid* of patch tokens
 (N=21). A more brain-aligned factorisation describes it by *things*: a
@@ -218,9 +238,8 @@ plausible contributor to DROP prediction being ~50× harder than movement
 prediction error, or by how much the state actually changed (latent-space
 displacement `‖z' − z‖`). This rebalances *which transitions* the model
 learns from — complementary to the sparse-change prior, which rebalances
-*which dimensions*. Best evaluated as a one-flag A/B once Exp-6 lands, so
-the two interventions are not confounded. Generalizes to any task — no
-Tetris-specific assumptions.
+*which dimensions*. Best evaluated as a one-flag A/B against film-100k.
+Generalizes to any task — no Tetris-specific assumptions.
 
 ### Depth and head count
 Default is `depth=2, heads=4`. With only 7 tokens and a 128-d model, this
