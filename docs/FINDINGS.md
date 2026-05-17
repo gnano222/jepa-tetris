@@ -901,3 +901,117 @@ clean re-run would also recover λ=0.01's M1/M2/M4.
 
 **Benchmark.** film-100k remains the default checkpoint on every metric. Exp-7 is
 a negative result; no checkpoint is carried forward.
+
+---
+
+## Exp-8 — Token-gated sparse predictor: architectural sparsity over patch tokens (2026-05-17)
+
+**Question.** Exp-7's sparse-change *penalty* collapsed the encoder. Does making
+sparsity **architectural** instead — the predictor structurally limited to
+changing at most `k` of the 21 patch tokens, the rest copied forward exactly —
+speed convergence or sharpen causality without that failure mode?
+
+**Method.** In the FiLM predictor, a `gate_head` emits one logit per patch token;
+a hard top-k mask (straight-through) selects ≤k tokens; `ẑ′ = z + mask ⊙ delta`,
+so the other 21−k tokens are copied forward unchanged. No loss penalty — `k` is a
+fixed architectural cap, nothing rewards "change less." Sparsity is over the
+encoder's *existing* spatial factorisation (patch tokens), not Exp-7's arbitrary
+channel groups. Design spec:
+[docs/superpowers/specs/2026-05-17-token-gated-predictor-design.md](superpowers/specs/2026-05-17-token-gated-predictor-design.md).
+
+**Setup.** Two runs identical to film-100k (two-scale N=21 encoder, FiLM, 100k
+steps, batch 256, seed 0, `data/buffer.npz`) — only the gate is added. k ∈ {6, 10};
+film-100k is the k=21 (ungated) anchor. The Exp-7 checkpoint-collision bugs were
+fixed first (`.env.runpod` per-branch defaults; intermediate checkpoints named
+`<out-stem>_step{N}.pt`), so per-run step checkpoints survived and the convergence
+curve is intact this time.
+
+**Results — final metrics, all three runs.**
+
+| metric | film-100k (k=21) | k=10 | k=6 |
+|---|---|---|---|
+| cos@1 | **0.9983** | 0.9979 | 0.9966 |
+| cos@4 | **0.9891** | 0.9854 | 0.9793 |
+| cos@8 | **0.9708** | 0.9618 | 0.9518 |
+| cos@16 | **0.9309** | 0.9139 | 0.9054 |
+| MSE@1 | **0.0136** | 0.0170 | 0.0264 |
+| DROP MSE@1 | **0.0678** | 0.0864 | 0.1390 |
+| LEFT MSE@1 | 0.00097 | 0.00076 | **0.00068** |
+| M1 | **0.983** | 0.982 | 0.961 |
+| M2 | 0.954 | **0.958** | 0.943 |
+| M4 | **0.040** | 0.041 | 0.070 |
+
+**Results — realised footprint (`live_tokens` @ k=1, end of training).**
+
+| run | LEFT | RIGHT | ROTATE | DROP |
+|---|---|---|---|---|
+| k=10 | 4.2 | 4.0 | 3.1 | **10.0** (cap) |
+| k=6 | 2.7 | 2.6 | 1.9 | **6.0** (cap) |
+
+**Results — convergence (held-out cos@4 / M1 vs. step).**
+
+| step | k=10 cos@4 / M1 | k=6 cos@4 / M1 |
+|---|---|---|
+| 5 000 | 0.9228 / 0.978 | 0.9317 / 0.986 |
+| 25 000 | 0.9728 / 0.988 | 0.9712 / 0.976 |
+| 50 000 | 0.9825 / 0.987 | 0.9785 / 0.972 |
+| 100 000 | 0.9854 / 0.982 | 0.9793 / 0.961 |
+
+Training-log `cos_sim`/`mse` (apples-to-apples, all three runs) has film-100k
+ahead of k=10 ahead of k=6 at *every* milestone from step 100 onward.
+
+**Conclusions.**
+
+**1. Negative on prediction, and strictly monotonic in `k`.** film-100k (k=21) ≥
+k=10 ≥ k=6 on every prediction metric. A global cap on changeable tokens only
+*subtracts* capacity — the predictor uses every token it is allowed. There is no
+convergence speed-up: film-100k leads from step 100.
+
+**2. But no collapse — architectural sparsity is safe, as predicted.** k=10 holds
+M1=0.982, M2=0.958, M4=0.041 — statistically indistinguishable from film-100k
+(0.983 / 0.954 / 0.040). Action causality is fully preserved. This is the decisive
+contrast with Exp-7, where a sparsity *penalty* crashed M1 to 0.28: with no
+penalty there is no reward to game, the gate only routes, the encoder is
+untouched. The encoder/predictor split reasoning held up.
+
+**3. DROP is starved — the gate measured the real asymmetry, but a global cap
+cannot serve it.** `live_tokens` shows DROP pinned at the cap for the *entire*
+run (6.0 at k=6, 10.0 at k=10) — DROP wants more than 10 tokens throughout.
+Movement contracts over training to ~2.5 (k=6) / ~4 (k=10): the model genuinely
+learns movement's footprint is small. So the DROP ≫ movement asymmetry the design
+hoped for is real and visible — but a single global `k` either starves DROP
+(k ≤ 10) or is too loose to constrain movement (k ≳ 12). DROP MSE@1 degrades
+monotonically as the cap tightens: 0.068 → 0.086 → 0.139. The design needed a
+*per-action* budget, not one global cap.
+
+**4. Movement was never the problem.** LEFT/RIGHT/ROTATE MSE@1 is ~0.0007–0.0010
+for all three runs — essentially equal (the gate even shaves it slightly via exact
+copy-forward). film-100k already predicts movement near-perfectly. The gate
+constrains the part that was already solved and starves the part that is hard.
+This is the third intervention (after the CF study and Exp-7) to confirm **DROP is
+the bottleneck and generic change-constraints do not address it** — DROP is hard
+because of *what* changes (line clears, piece lock, piece reset), not *how many
+tokens* change.
+
+**5. A faint early-convergence hint, not a win.** In held-out cos@4, k=6 is
+marginally ahead of k=10 at 5k–10k steps (0.932 vs 0.923) — the smaller hypothesis
+space does converge slightly faster very early — but k=10 overtakes by 25k and
+neither approaches film-100k. The hypothesis-space-shrinkage effect exists but is
+tiny and swamped by the DROP capacity loss.
+
+**6. k=6's causality degrades over training.** k=6 M1 traces 0.986 → 0.984 →
+0.976 → 0.972 → 0.961 — a slow decline reminiscent of Exp-7's single-action
+overfitting, though far milder (k=10 stays flat at ~0.98). A cap tight enough to
+bind on movement, not just DROP, is mildly pathological.
+
+**7. The fixed-grid result motivates the slot encoder (Design 2).** That a
+fixed-grid token gate cannot serve DROP and movement with one knob is itself the
+evidence — anticipated in the spec — that a *fixed grid* is too crude. An
+object-centric encoder where the falling piece is one slot and the pile another
+(`RESEARCH_ROADMAP.md` → "Object-centric / slot encoder") is the natural next
+step: DROP's restructuring (piece → pile, line clear) is a slot-level event, not a
+patch-count event.
+
+**Benchmark.** film-100k remains the default checkpoint on every metric. Exp-8 is
+a negative result; no checkpoint is carried forward. The token-gate flags
+(`--predictor-token-gate`, `--token-gate-k`, default off) remain in `train.py`.

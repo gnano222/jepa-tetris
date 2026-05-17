@@ -107,15 +107,19 @@ becomes *automatic*: an action updates the piece slot and leaves the pile
 slots untouched, with no gate or penalty needed — the factorisation itself
 carries the inductive bias. This is also the most general direction (for
 computer-use the "things" become windows, buttons, icons; a click affects
-one). It is the natural follow-up to the token-gated predictor (Exp-8): if
-a *fixed-grid* gate proves too crude to pin down what each action touches,
-that failure is the evidence that genuine object slots are needed.
+one). It is the natural follow-up to the token-gated predictor: Exp-8
+confirmed the rationale — a *fixed-grid* gate could not pin down what DROP
+touches (it wants more tokens than any movement-tight cap allows; see
+[FINDINGS.md — Exp-8](FINDINGS.md)). That failure is the evidence that a
+fixed grid is too crude and genuine object slots are needed: DROP's
+restructuring (piece → pile, line clear) is a slot-level event, not a
+patch-count event.
 
 Cost / risk: a full encoder rewrite; Slot Attention is notoriously fiddly
 to train stably; and Tetris has only ~2 entities (piece + pile), so the
 machinery may be heavy relative to the payoff *on this task* — its value
-shows most on scenes with many objects. Sequencing: pursue after the
-token-gated predictor result is in.
+shows most on scenes with many objects. Sequencing: ⬅ NEXT UP — the
+token-gated result (Exp-8) is in, and points here.
 
 ## Predictor (`jepa_tetris/models/predictor.py`)
 
@@ -186,6 +190,22 @@ redesigns if revisited: stop-grad the encoder from the sparse term;
 weight the penalty by causal relevance not magnitude; or anchor the
 encoder with a reconstruction term. Flags `--sparse-change-weight` /
 `--sparse-change-groups` remain in `train.py` (default 0 = off).
+
+### ~~Token-gated sparse predictor~~ ❌ TESTED — REGRESSION (Exp-8)
+The architectural successor to the sparse-change prior: a hard top-k gate
+lets the predictor change at most `k` of the 21 patch tokens, copying the
+rest forward exactly — no penalty, so no collapse. See
+[FINDINGS.md — Exp-8](FINDINGS.md). It worked as designed *and still lost*:
+unlike Exp-7 it preserved causality (k=10 M1=0.982, matching film-100k),
+but a single global cap only subtracts capacity. The `live_tokens`
+diagnostic showed DROP pinned at the cap throughout (it wants >10 tokens)
+while movement contracted to ~3 — so the cap starves DROP and does nothing
+for movement, which was already solved. DROP MSE@1 degraded monotonically
+as `k` tightened (0.068 → 0.086 → 0.139). Confirms a recurring result:
+DROP is the bottleneck and generic change-constraints do not touch it. The
+fixed-grid failure motivates the slot encoder (see Encoder §). Flags
+`--predictor-token-gate` / `--token-gate-k` remain in `train.py` (default
+off).
 
 ### Surprise-gated loss
 The brain learns from prediction *error* — plasticity is gated by
