@@ -228,6 +228,13 @@ def main():
     parser.add_argument("--predictor-cross-attn", action="store_true",
                         help="Cross-attention action conditioning: patches attend to action as "
                              "KV tokens after each self-attention block. Replaces extra-token.")
+    parser.add_argument("--predictor-token-gate", action="store_true",
+                        help="Token-gated sparse predictor: a hard top-k gate selects which "
+                             "patch tokens may change; the rest are copied forward exactly. "
+                             "Requires --predictor-film.")
+    parser.add_argument("--token-gate-k", type=int, default=21,
+                        help="Max tokens the predictor may change per step (token-gate cap). "
+                             "21 = no gating (reproduces the ungated FiLM predictor).")
     parser.add_argument("--counterfactual", action="store_true",
                         help="Train against all NUM_ACTIONS counterfactual next-states per "
                              "starting state. Requires a buffer produced with --counterfactual. "
@@ -274,6 +281,8 @@ def main():
         parser.error("--local-loss is incompatible with --counterfactual")
     if args.sparse_change_weight > 0 and args.patch_dim % args.sparse_change_groups != 0:
         parser.error("--sparse-change-groups must divide --patch-dim")
+    if args.predictor_token_gate and not args.predictor_film:
+        parser.error("--predictor-token-gate requires --predictor-film")
 
     if args.log_file is None:
         log_path = run_dir(args.run) / "train_log.jsonl"
@@ -323,6 +332,8 @@ def main():
         residual=not args.predictor_no_residual,
         film=args.predictor_film,
         cross_attn=args.predictor_cross_attn,
+        token_gate=args.predictor_token_gate,
+        token_gate_k=args.token_gate_k,
     ).to(device)
 
     column_heads = None
@@ -354,6 +365,7 @@ def main():
         log_now = (step % args.log_every == 0)
         sparse_loss_val = None
         active_groups_val = None
+        live_tokens_val = None
         if args.counterfactual:
             mse_tf_val = None
             mse_ar_val = None
@@ -540,6 +552,23 @@ def main():
                 z_pred = predictor(z_in, a_emb).view(B, H, N, D)
                 mse_tf = F.mse_loss(z_pred, z_target)
                 mse_tf_val = mse_tf.item()
+
+                if args.predictor_token_gate and log_now:
+                    # live_tokens: mean # tokens whose actual change exceeds a
+                    # small RMS threshold (the realised footprint, ≤ k), by action.
+                    # The hard mask sum is always exactly k and uninformative;
+                    # what matters is which unlocked tokens really moved.
+                    with torch.no_grad():
+                        chg = (z_pred - z_all[:, :H]).reshape(B * H, N, D)
+                        tok_rms = chg.pow(2).mean(-1).sqrt()           # (B*H, N)
+                        live = (tok_rms > 0.05).float().sum(-1)        # (B*H,)
+                        a_flat = actions.reshape(B * H)
+                        live_tokens_val = {}
+                        for _ai, _nm in enumerate(["LEFT", "RIGHT", "ROTATE", "DROP"]):
+                            _m = a_flat == _ai
+                            live_tokens_val[_nm] = (
+                                live[_m].mean().item() if _m.any() else float("nan")
+                            )
                 if args.ar_weight > 0:
                     # Mixed: also run an autoregressive rollout from z_all[:, 0]
                     # and add its MSE term weighted by --ar-weight.
@@ -625,6 +654,8 @@ def main():
             if sparse_loss_val is not None:
                 record["sparse_loss"] = sparse_loss_val
                 record["active_groups"] = active_groups_val
+            if live_tokens_val is not None:
+                record["live_tokens"] = live_tokens_val
             logger.log(record)
             pbar.set_postfix(loss=f"{loss.item():.4f}", z_std=f"{z_std_mean:.3f}")
 
@@ -671,6 +702,7 @@ def main():
         _pa_cos_k1: dict[str, float] = {}
         _pa_mse_k1: dict[str, float] = {}
         _pa_active_k1: dict[str, float] = {}
+        _pa_live_k1: dict[str, float] = {}
 
         encoder.eval()
         action_encoder.eval()
@@ -694,6 +726,15 @@ def main():
                             _idx = np.where(_a0_np == _ai)[0]
                             _pa_active_k1[_name] = (
                                 float(_agp[_idx].mean()) if _idx.size > 0 else float("nan")
+                            )
+                    if args.predictor_token_gate:
+                        # Per-action footprint: tokens whose change RMS exceeds eps.
+                        _trms = _d1.pow(2).mean(-1).sqrt()                # (B, N)
+                        _liv = (_trms > 0.05).float().sum(-1).cpu().numpy()  # (B,)
+                        for _ai, _name in enumerate(_ACTION_NAMES):
+                            _idx = np.where(_a0_np == _ai)[0]
+                            _pa_live_k1[_name] = (
+                                float(_liv[_idx].mean()) if _idx.size > 0 else float("nan")
                             )
                 if _k not in _h_set:
                     continue
@@ -720,6 +761,8 @@ def main():
             "per_action_mse_k1": _pa_mse_k1,
             "per_action_active_groups_k1": _pa_active_k1,
             "sparse_change_groups": args.sparse_change_groups,
+            "per_action_live_tokens_k1": _pa_live_k1,
+            "token_gate_k": args.token_gate_k,
             "n": _eval_n,
             "buffer": args.buffer,
             "jepa": args.out,

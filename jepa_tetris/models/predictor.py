@@ -25,17 +25,28 @@ class Predictor(nn.Module):
         dropout: float = 0.0,
         film: bool = False,
         cross_attn: bool = False,
+        token_gate: bool = False,
+        token_gate_k: int = 21,
     ):
         super().__init__()
         if depth < 1:
             raise ValueError(f"depth must be >= 1, got {depth}")
         if film and cross_attn:
             raise ValueError("film and cross_attn are mutually exclusive")
+        if token_gate and not film:
+            raise ValueError("token_gate requires film=True")
+        if token_gate and token_gate_k < 1:
+            raise ValueError(f"token_gate_k must be >= 1, got {token_gate_k}")
         self.patch_dim = patch_dim
         self.num_patches = num_patches
         self.residual = residual
         self.film = film
         self.cross_attn = cross_attn
+        self.token_gate = token_gate
+        self.token_gate_k = token_gate_k
+        # Diagnostic: the most recent gate mask (B, N), detached. None until a
+        # token-gated forward runs. Read by train.py for the live_tokens log.
+        self._last_mask = None
 
         # extra-token uses N+1 positions; film/cross-attn use N (action injected externally)
         seq_len = num_patches if (film or cross_attn) else num_patches + 1
@@ -70,6 +81,28 @@ class Predictor(nn.Module):
                 [nn.LayerNorm(patch_dim) for _ in range(depth)]
             )
 
+        if token_gate:
+            # One gate logit per token, from the transformer output.
+            self.gate_head = nn.Linear(patch_dim, 1)
+
+    def _token_gate_mask(self, seq: torch.Tensor) -> torch.Tensor:
+        """Straight-through hard top-k token mask.
+
+        seq: (B, N, D) transformer output. Returns (B, N, 1) — a binary mask
+        with exactly min(k, N) ones per row (forward), with gradient routed
+        through a sigmoid surrogate so every logit is shaped (backward).
+        """
+        logits = self.gate_head(seq).squeeze(-1)             # (B, N)
+        N = logits.shape[-1]
+        k = min(self.token_gate_k, N)
+        hard = torch.zeros_like(logits)
+        topk_idx = logits.topk(k, dim=-1).indices            # (B, k)
+        hard.scatter_(-1, topk_idx, 1.0)                     # (B, N) in {0,1}
+        soft = torch.sigmoid(logits)
+        mask = hard + soft - soft.detach()                   # straight-through
+        self._last_mask = hard.detach()                      # diagnostic
+        return mask.unsqueeze(-1)                            # (B, N, 1)
+
     def forward(self, z: torch.Tensor, a_emb: torch.Tensor) -> torch.Tensor:
         """
         z:     (B, N, D)  current patch tokens
@@ -83,6 +116,9 @@ class Predictor(nn.Module):
                 gamma, beta = film_linear(a_emb).chunk(2, dim=-1)  # (B, D) each
                 seq = gamma.unsqueeze(1) * seq + beta.unsqueeze(1)
             delta = seq
+            if self.token_gate:
+                # Gate which tokens may change; ungated tokens copied exactly.
+                return z + self._token_gate_mask(seq) * delta
 
         elif self.cross_attn:
             seq = z + self.pos_emb       # (B, N, D)

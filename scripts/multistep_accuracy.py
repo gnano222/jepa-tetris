@@ -83,6 +83,8 @@ def main():
         residual=pred_residual,
         film=ckpt["args"].get("predictor_film", False),
         cross_attn=ckpt["args"].get("predictor_cross_attn", False),
+        token_gate=ckpt["args"].get("predictor_token_gate", False),
+        token_gate_k=ckpt["args"].get("token_gate_k", 21),
     ).to(device)
     predictor.load_state_dict(ckpt["predictor"])
     predictor.eval()

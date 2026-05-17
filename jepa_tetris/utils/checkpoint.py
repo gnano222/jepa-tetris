@@ -53,6 +53,8 @@ def load_jepa(path: str, device: torch.device) -> JepaBundle:
         residual=not args.get("predictor_no_residual", False),
         film=args.get("predictor_film", False),
         cross_attn=args.get("predictor_cross_attn", False),
+        token_gate=args.get("predictor_token_gate", False),
+        token_gate_k=args.get("token_gate_k", 21),
     ).to(device)
     predictor.load_state_dict(ckpt["predictor"])
     predictor.eval()
