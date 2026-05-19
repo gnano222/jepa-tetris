@@ -247,28 +247,33 @@ is plenty of capacity, but it's untuned.
 
 ## Inverse model (`jepa_tetris/models/inverse_model.py`)
 
-### ICM-style inverse head ⬅ IN PROGRESS (Exp-10)
+### ~~ICM-style inverse head~~ ❌ TESTED — TRADE-OFF (Exp-10)
 The predictor is a *forward* model: `(state, action) → next state`. It never
 asks the converse — *what action caused this change?* The brain's motor system
 runs **paired** forward and inverse models that bootstrap each other (Wolpert &
-Kawato's MOSAIC, 1998); the inverse half turns a goal into the motor command
-that reaches it. Exp-10 adds the inverse half in its simplest proven form — the
-ICM recipe (Pathak et al. 2017): a second head, `(z_t, z_{t+1}) → action`,
-trained jointly over the *same* encoder. Recovering the action forces the
-encoder to keep action-causal information: you cannot tell LEFT from RIGHT
-without precise piece position, so the "discard piece position" failure mode of
-Exp-7 becomes structurally impossible. It also turns the M1 action-retrieval
-*eval* metric into a training *objective*.
+Kawato's MOSAIC, 1998). Exp-10 added the inverse half in its simplest proven
+form — the ICM recipe (Pathak et al. 2017): a second head,
+`(z_t, z_{t+1}) → action`, trained jointly over the *same* encoder, on the
+hypothesis that recovering the action forces the encoder to keep action-causal
+information. See [FINDINGS.md — Exp-10](FINDINGS.md).
 
-`InverseModel` is the predictor's mirror twin — a per-patch `[z; z'; z'−z]`
-projection, spatial positional embeddings, a shallow transformer, mean-pool →
-`(B, 4)` action logits. Notably it is *not* modelled on the `Probe`: the Probe
-pools an unordered patch set, which discards the spatial localisation that LEFT
-vs RIGHT depends on. Wired into the teacher-forced path as a cross-entropy term
-behind `--inverse-weight` (default 1.0; `0` = baseline forward-only). Risk
-(per Exp-5): an extra objective can trade long-horizon `cos@k` for causality —
-the run must report both. Follow-ups if it lands: cycle consistency, a
-hindsight multi-step variant, and an inverse-model goal-conditioned planner.
+`InverseModel` (kept in `train.py` behind `--inverse-weight`, default **0**) is
+the predictor's mirror twin — per-patch `[z; z'; z'−z]` projection + positional
+embeddings + shallow transformer + mean-pool → `(B, 4)` logits. Result: a
+trade-off, no Pareto win. The classification CE optimises *separability* and got
+it — M1 action retrieval 0.983→0.994, DROP retrieval 0.938→0.980 — by spreading
+the actions ~50% further apart in latent space. But a more spread-out target is
+harder to predict: `cos@k` and MSE regressed at every horizon and every action
+(MSE@1 +51%), and M2 distance calibration fell 0.95→0.90. **The inverse-dynamics
+objective wants a separable latent space; forward prediction wants a compact,
+predictable one — they pull the shared encoder apart.** And the premise did not
+hold: film-100k's encoder already retains piece position (movement MSE@1 ~0.001,
+M1 ~1.0), so the inverse loss spent fidelity to buy separability the task did
+not need. Echoes Exp-5 (CF+FiLM): causality up, `cos@k` down, no Pareto win. The
+scoped follow-ups (cycle consistency, hindsight multi-step) would *strengthen*
+the inverse coupling and thus deepen the trade-off — not pursued. Narrow
+exception: DROP retrieval did improve, so a much smaller λ_inv or a DROP-only
+inverse term could be revisited if a downstream planner needs DROP causality.
 
 ## Action encoder (`jepa_tetris/models/action_encoder.py`)
 
@@ -358,6 +363,7 @@ Roughly increasing surgery, all encoder/predictor focused.
 7. **Heuristic distillation** (Data) — higher line-clear density in the buffer.
    DROP MSE improved dramatically with FiLM (0.107) but further gains likely
    require richer training signal on rare DROP transitions.
-8. **ICM-style inverse head** ⬅ IN PROGRESS — inverse-dynamics auxiliary loss
-   over the shared encoder (Exp-10). See [FINDINGS.md — Exp-10](FINDINGS.md).
+8. ~~**ICM-style inverse head**~~ ❌ TRADE-OFF — inverse-dynamics auxiliary loss
+   over the shared encoder (Exp-10). Causality up, `cos@k`/MSE down, no Pareto
+   win. See [FINDINGS.md — Exp-10](FINDINGS.md).
 9. **Structured action encoder** — only when moving beyond Tetris.

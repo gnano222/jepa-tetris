@@ -305,13 +305,14 @@ def main():
     parser.add_argument("--sparse-change-groups", type=int, default=16,
                         help="Number of channel groups for the sparse-change "
                              "group lasso. Must divide patch_dim.")
-    parser.add_argument("--inverse-weight", type=float, default=1.0,
+    parser.add_argument("--inverse-weight", type=float, default=0.0,
                         help="Weight λ on the ICM-style inverse-dynamics loss: "
                              "cross-entropy of an InverseModel recovering each "
                              "executed action from an adjacent (z_t, z_{t+1}) pair. "
-                             "The loss backprops into the shared encoder, forcing it "
-                             "to keep action-causal information. 0 = off (baseline "
-                             "forward-only training). Teacher-forced default path only.")
+                             "The loss backprops into the shared encoder. 0 = off "
+                             "(default; baseline forward-only training). Exp-10 found "
+                             "λ>0 a trade-off — causality up, cos@k/MSE down, no "
+                             "Pareto win. Teacher-forced default path only.")
     parser.add_argument("--inverse-depth", type=int, default=2,
                         help="TransformerEncoderLayer blocks in the InverseModel.")
     parser.add_argument("--inverse-heads", type=int, default=4,

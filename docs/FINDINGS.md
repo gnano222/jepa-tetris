@@ -1117,9 +1117,6 @@ is a non-starter; no checkpoint is carried forward. Flags `--encoder-columnar`,
 
 ## Exp-10 — ICM-style inverse head: shared encoder, forward + inverse (2026-05-19)
 
-*Status: implemented and smoke-tested; the full 100k comparison run is pending,
-so this entry has no Results/Conclusions yet.*
-
 **Question.** Every JEPA model here so far is a *forward* model — it predicts
 `(state, action) → next state` and never the converse. The encoder is therefore
 only ever asked "what is predictable," never "what action caused this change."
@@ -1133,32 +1130,97 @@ action-causal information, and at what cost to forward fidelity?
 **Method.** A new `InverseModel` head reads two encoded states and predicts the
 action between them: `(z_t, z_{t+1}) → (B, 4)` logits. It is the predictor's
 mirror twin — a per-patch `[z ; z' ; z'−z]` projection, spatial positional
-embeddings, a 2-layer transformer, mean-pool → linear. It is deliberately *not*
+embeddings, a 2-layer transformer, mean-pool → linear (deliberately *not*
 modelled on the `Probe`, whose unordered pooling discards the spatial
-localisation that LEFT vs RIGHT depends on. Training adds one cross-entropy term
+localisation LEFT vs RIGHT depends on). Training adds one cross-entropy term
 over the H adjacent pairs in each teacher-forced window:
-`L = L_fwd + λ_inv·L_inv + VICReg`, with both `z_t` and `z_{t+1}` from the
-*online* encoder so the gradient reaches the shared encoder from both. Behind
-`--inverse-weight` (default 1.0; `0` reproduces baseline forward-only training).
-Restricted to the default teacher-forced path for v1 (errors with
-`--counterfactual` / `--local-loss`). This is the minimal first step — cycle
-consistency, a hindsight multi-step variant, and an inverse-model planner are
-explicit follow-ups, not in scope.
+`L = L_fwd + λ_inv·L_inv + VICReg`, λ_inv = 1.0, with both `z_t` and `z_{t+1}`
+from the *online* encoder so the gradient reaches the shared encoder from both.
+This is the minimal first step — cycle consistency, a hindsight multi-step
+variant, and an inverse-model planner were scoped as explicit follow-ups.
 
-**Smoke test.** 2000 steps, `data/buffer.npz`, batch 256, extra-token predictor.
-`inverse_acc` rises from 0.24 (≈ chance for 4 actions) to 1.00 by step 400 and
-holds; `inverse_loss` falls to ~10⁻³; forward `cos_sim` stays healthy (~0.965)
-and total `loss` is finite throughout. Confirms the wiring and that the encoder
-*can* support near-perfect action recovery — it does not yet say whether the
-auxiliary loss improves the causality metrics or trades off `cos@k`.
+**Setup.** One 100k run, `jepa-exp-icm-inverse.pt`, in the exact film-100k config
+(`--predictor-film --encoder-stride-stages 2 --encoder-two-scale`, two-scale N=21,
+batch 256, `data/buffer.npz`, seed 0) so the only difference from the benchmark
+is the added inverse loss. Success criterion (pre-registered): M1/M2/M4 ≥
+film-100k **and** `cos@k` not materially regressed.
 
-**Success criterion (for the pending run).** Full 100k run in the film-100k
-config (`--predictor-film --encoder-stride-stages 2 --encoder-two-scale`).
-Success = M1/M2/M4 ≥ film-100k **and** `cos@k` not materially regressed — Exp-5
-is the cautionary precedent (counterfactual training won causality but lost
-long-horizon `cos@k`), so both must be reported, not causality alone.
+**Results — forward prediction (multistep, held-out, n=2000).**
 
-**Benchmark.** film-100k remains the default checkpoint until the Exp-10 run
-lands. Flag `--inverse-weight` (with `--inverse-depth` / `--inverse-heads`)
-is in `train.py`; the optional `inverse_model` checkpoint key loads via
-`load_jepa` and is absent from all pre-Exp-10 checkpoints.
+| metric | film-100k | Exp-10 ICM | Δ |
+|---|---|---|---|
+| cos@1 | **0.9983** | 0.9972 | −0.0011 |
+| cos@4 | **0.9891** | 0.9854 | −0.0037 |
+| cos@16 | **0.9309** | 0.9223 | −0.0086 |
+| MSE@1 | **0.0136** | 0.0205 | +51% |
+| LEFT/RIGHT/ROTATE MSE@1 | **~0.0011** | ~0.0017 | +50–58% |
+| DROP MSE@1 | **0.0678** | 0.1022 | +51% |
+
+**Results — action causality (n=500, ε=0.3).**
+
+| metric | film-100k | Exp-10 ICM | direction |
+|---|---|---|---|
+| M1 action retrieval (↑) | 0.9830 | **0.9935** | ICM wins +1.1pp |
+| — M1 on DROP | 0.938 | **0.980** | ICM wins +4.2pp |
+| M2 distance calibration (↑) | **0.9541** | 0.8962 | ICM loses −5.8pp |
+| M4 no-op recognition (↓) | **0.0400** | 0.0438 | ~tied (ICM marginally worse) |
+
+**Conclusions.**
+
+**1. Trade-off, not an upgrade — fails the success criterion.** Of the four
+pre-registered conditions, exactly one is met: M1 rises, but M2 and M4 fall and
+`cos@k`/MSE regress at *every* horizon and *every* action. Movement MSE@1 — not
+just DROP — degrades ~50%. This is the Exp-5 failure mode (counterfactual
+training won causality, lost `cos@k`, "no strict Pareto improvement"), reached by
+a different route and slightly worse: Exp-10 also drags down M2 calibration,
+which CF did not.
+
+**2. The inverse loss reshaped the latent geometry — it spread the actions
+apart.** The mechanism is visible in the encoder's true pairwise action
+distances: ICM's movement–movement pairs sit at ~25 (0-1: 27.4, 0-2: 24.9,
+1-2: 24.5) versus film-100k's ~16 (21.0, 15.3, 14.5) — the inverse loss pushed
+LEFT/RIGHT/ROTATE ~50% further apart in latent space. That is exactly what a
+classification CE optimises: *separability*. And it worked — M1 rises, DROP
+retrieval especially (0.938→0.980). But a more spread-out target space is
+*harder to predict*: the predictor must hit a moving target across a wider
+range, so MSE rises and `cos@k` falls; and the predictor's standing
+under-shoot on DROP distance (pred 33.7 vs true 39.1) costs proportionally more
+rank correlation once the overall scale is larger, so M2 drops. **The
+inverse-dynamics objective wants a *separable* latent space; the
+forward-prediction objective wants a *compact, predictable* one. They pull the
+shared encoder in different directions.**
+
+**3. The premise did not hold for this baseline.** Exp-10 was motivated by
+Exp-7's "the encoder discards piece position." But film-100k's movement MSE@1 is
+~0.001 and its M1 on movement is ~1.0 — its encoder already retains piece
+position essentially perfectly. FiLM-conditioned training had already solved the
+problem the inverse loss was brought in to solve (cf. Exp-5: "FiLM already
+solved causality well, M1 0.983 alone"). With no real causality headroom, the
+inverse loss spent forward fidelity to buy separability the task did not need.
+The one genuine gain is DROP *retrieval* (M1 DROP +4.2pp) — and even that did
+not improve DROP *prediction* (DROP MSE@1 got worse).
+
+**4. The inverse model is a good diagnostic, a poor auxiliary loss.** During
+training `inverse_acc` reaches 1.00 within a few hundred steps and holds — a
+clean, near-free confirmation that the encoder is action-complete. As a
+*read-out* it works perfectly; as a *training pressure* at λ_inv = 1.0 it is
+net-negative on this task.
+
+**5. Implications for the follow-ups.** Cycle consistency and the hindsight
+multi-step variant were scoped to *strengthen* the inverse coupling — given v1
+shows the coupling itself is the problem, strengthening it would deepen the
+trade-off, not fix it. They should not be pursued as specified. The narrow
+exception worth a future look: DROP retrieval did improve, so a much smaller
+λ_inv, or applying the inverse loss *only* to DROP-involving pairs, might land
+nearer Pareto if DROP causality specifically matters for a downstream planner.
+On the open question of training the inverse model only against the predictor's
+*imagination* (decoupled from the encoder) — that is the cycle-consistency
+direction and is now de-prioritised.
+
+**Benchmark.** film-100k remains the default checkpoint on every metric. Exp-10
+is a trade-off with no Pareto win; no checkpoint is carried forward
+(`jepa-exp-icm-inverse.pt` is retained only for the inverse-model diagnostic and
+the DROP-retrieval property). `--inverse-weight` now defaults to **0** (off);
+the flag, `--inverse-depth`/`--inverse-heads`, and the optional `inverse_model`
+checkpoint key remain in `train.py` / `load_jepa` (pre-Exp-10 checkpoints load
+unaffected).
