@@ -12,12 +12,17 @@ import torch
 from jepa_tetris.models.action_encoder import ActionEncoder
 from jepa_tetris.models.decoder import StateDecoder
 from jepa_tetris.models.encoder import StateEncoder, make_encoder_from_args
+from jepa_tetris.models.inverse_model import InverseModel
 from jepa_tetris.models.predictor import Predictor
 
 
 @dataclass
 class JepaBundle:
-    """All four JEPA submodules in eval mode with grads disabled."""
+    """All four JEPA submodules in eval mode with grads disabled.
+
+    `inverse_model` is the optional Exp-10 ICM head — None for any checkpoint
+    trained without --inverse-weight (including all pre-Exp-10 checkpoints).
+    """
 
     encoder: StateEncoder
     target_encoder: StateEncoder
@@ -26,6 +31,7 @@ class JepaBundle:
     patch_dim: int
     num_patches: int
     args: dict
+    inverse_model: InverseModel | None = None
 
 
 def load_jepa(path: str, device: torch.device) -> JepaBundle:
@@ -59,7 +65,22 @@ def load_jepa(path: str, device: torch.device) -> JepaBundle:
     predictor.load_state_dict(ckpt["predictor"])
     predictor.eval()
 
-    for m in (encoder, target_encoder, action_encoder, predictor):
+    modules = [encoder, target_encoder, action_encoder, predictor]
+
+    # Exp-10 inverse model — only present if trained with --inverse-weight > 0.
+    inverse_model = None
+    if ckpt.get("inverse_model") is not None:
+        inverse_model = InverseModel(
+            patch_dim=patch_dim,
+            num_patches=encoder.num_patches,
+            num_heads=args.get("inverse_heads", 4),
+            depth=args.get("inverse_depth", 2),
+        ).to(device)
+        inverse_model.load_state_dict(ckpt["inverse_model"])
+        inverse_model.eval()
+        modules.append(inverse_model)
+
+    for m in modules:
         for p in m.parameters():
             p.requires_grad_(False)
 
@@ -71,6 +92,7 @@ def load_jepa(path: str, device: torch.device) -> JepaBundle:
         patch_dim=patch_dim,
         num_patches=encoder.num_patches,
         args=args,
+        inverse_model=inverse_model,
     )
 
 

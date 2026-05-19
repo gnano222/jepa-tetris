@@ -251,6 +251,65 @@ def test_predictor_extra_token_pos_emb_shape():
     assert pred.pos_emb.shape == (1, N_DEFAULT + 1, 128)
 
 
+def test_inverse_model_shape():
+    """InverseModel maps two patch grids -> (B, NUM_ACTIONS) action logits."""
+    from jepa_tetris.models.inverse_model import InverseModel
+
+    inv = InverseModel(patch_dim=128, num_patches=N_DEFAULT)
+    z = torch.randn(8, N_DEFAULT, 128)
+    z_next = torch.randn(8, N_DEFAULT, 128)
+    logits = inv(z, z_next)
+    assert logits.shape == (8, 4)
+
+
+def test_inverse_model_gradients_flow_to_encoder():
+    """An inverse-dynamics CE loss must push gradient into the shared encoder
+    from BOTH the current and next encoded state."""
+    from jepa_tetris.models.inverse_model import InverseModel
+
+    enc = StateEncoder(patch_dim=128)
+    inv = InverseModel(patch_dim=128, num_patches=enc.num_patches)
+    s = torch.randn(4, 2, 20, 10)
+    s_next = torch.randn(4, 2, 20, 10)
+    a = torch.tensor([0, 1, 2, 3])
+    logits = inv(enc(s), enc(s_next))
+    loss = nn.functional.cross_entropy(logits, a)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in enc.parameters())
+
+
+def test_inverse_model_15patch_compat():
+    """InverseModel works with the stride_stages=2 (15-patch) encoder."""
+    from jepa_tetris.models.inverse_model import InverseModel
+
+    enc = StateEncoder(patch_dim=128, stride_stages=2)
+    inv = InverseModel(patch_dim=128, num_patches=enc.num_patches)
+    z = enc(torch.randn(4, 2, 20, 10))
+    z_next = enc(torch.randn(4, 2, 20, 10))
+    assert inv(z, z_next).shape == (4, 4)
+
+
+def test_inverse_dynamics_loss_grad_and_accuracy():
+    """inverse_dynamics_loss over a (B, H+1, N, D) window: finite CE, accuracy
+    in [0, 1], and gradient flows back into the encoded states."""
+    from jepa_tetris.models.inverse_model import InverseModel
+    from jepa_tetris.train import inverse_dynamics_loss
+
+    torch.manual_seed(0)
+    B, H, N, D = 3, 4, N_DEFAULT, 128
+    inv = InverseModel(patch_dim=D, num_patches=N)
+    z_all = torch.randn(B, H + 1, N, D, requires_grad=True)
+    actions = torch.randint(0, 4, (B, H))
+
+    loss, acc = inverse_dynamics_loss(z_all=z_all, actions=actions, inverse_model=inv)
+    assert torch.isfinite(loss)
+    assert 0.0 <= acc <= 1.0
+
+    loss.backward()
+    assert z_all.grad is not None and z_all.grad.abs().sum() > 0
+
+
 def test_column_predictor_head_shape():
     head = ColumnPredictorHead(dim=128)
     z = torch.randn(8, 128)

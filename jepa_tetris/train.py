@@ -26,6 +26,7 @@ from jepa_tetris.data.replay_buffer import (
 )
 from jepa_tetris.models.action_encoder import ActionEncoder
 from jepa_tetris.models.encoder import StateEncoder
+from jepa_tetris.models.inverse_model import InverseModel
 from jepa_tetris.models.predictor import Predictor
 from jepa_tetris.utils.device import get_device
 from jepa_tetris.utils.logging import JsonlLogger
@@ -162,6 +163,35 @@ def columnar_local_loss(
     }
 
 
+def inverse_dynamics_loss(
+    *,
+    z_all: torch.Tensor,
+    actions: torch.Tensor,
+    inverse_model: torch.nn.Module,
+) -> tuple[torch.Tensor, float]:
+    """ICM-style inverse-dynamics loss over a teacher-forced H-step window.
+
+    For each of the H adjacent pairs (z_t, z_{t+1}) the inverse model must
+    recover the executed action a_t. Both states come from the *online*
+    encoder, so the cross-entropy backprops into the shared encoder and
+    pressures it to keep action-causal information (e.g. piece position).
+
+    z_all:   (B, H+1, N, D) online encoder outputs for the H+1-frame window.
+    actions: (B, H) executed actions per step.
+    Returns (scalar cross-entropy, argmax accuracy in [0, 1]).
+    """
+    B, Hp1, N, D = z_all.shape
+    H = Hp1 - 1
+    z_cur = z_all[:, :H].reshape(B * H, N, D)
+    z_nxt = z_all[:, 1:].reshape(B * H, N, D)
+    a = actions.reshape(B * H)
+    logits = inverse_model(z_cur, z_nxt)                # (B*H, NUM_ACTIONS)
+    loss = F.cross_entropy(logits, a)
+    with torch.no_grad():
+        acc = (logits.argmax(dim=-1) == a).float().mean().item()
+    return loss, acc
+
+
 @torch.no_grad()
 def ema_update(target: torch.nn.Module, online: torch.nn.Module, tau: float) -> None:
     for p_t, p_o in zip(target.parameters(), online.parameters()):
@@ -170,19 +200,22 @@ def ema_update(target: torch.nn.Module, online: torch.nn.Module, tau: float) -> 
         b_t.data.copy_(b_o.data)
 
 
-def save_checkpoint(path: Path, *, step: int, encoder, target_encoder, action_encoder, predictor, args) -> None:
+def save_checkpoint(
+    path: Path, *, step: int, encoder, target_encoder, action_encoder, predictor,
+    args, inverse_model=None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "step": step,
-            "encoder": encoder.state_dict(),
-            "target_encoder": target_encoder.state_dict(),
-            "action_encoder": action_encoder.state_dict(),
-            "predictor": predictor.state_dict(),
-            "args": vars(args),
-        },
-        path,
-    )
+    ckpt = {
+        "step": step,
+        "encoder": encoder.state_dict(),
+        "target_encoder": target_encoder.state_dict(),
+        "action_encoder": action_encoder.state_dict(),
+        "predictor": predictor.state_dict(),
+        "args": vars(args),
+    }
+    if inverse_model is not None:
+        ckpt["inverse_model"] = inverse_model.state_dict()
+    torch.save(ckpt, path)
 
 
 def main():
@@ -272,6 +305,17 @@ def main():
     parser.add_argument("--sparse-change-groups", type=int, default=16,
                         help="Number of channel groups for the sparse-change "
                              "group lasso. Must divide patch_dim.")
+    parser.add_argument("--inverse-weight", type=float, default=1.0,
+                        help="Weight λ on the ICM-style inverse-dynamics loss: "
+                             "cross-entropy of an InverseModel recovering each "
+                             "executed action from an adjacent (z_t, z_{t+1}) pair. "
+                             "The loss backprops into the shared encoder, forcing it "
+                             "to keep action-causal information. 0 = off (baseline "
+                             "forward-only training). Teacher-forced default path only.")
+    parser.add_argument("--inverse-depth", type=int, default=2,
+                        help="TransformerEncoderLayer blocks in the InverseModel.")
+    parser.add_argument("--inverse-heads", type=int, default=4,
+                        help="Attention heads in the InverseModel transformer.")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -283,6 +327,9 @@ def main():
         parser.error("--sparse-change-groups must divide --patch-dim")
     if args.predictor_token_gate and not args.predictor_film:
         parser.error("--predictor-token-gate requires --predictor-film")
+    if args.inverse_weight > 0 and (args.counterfactual or args.local_loss):
+        parser.error("--inverse-weight is only supported on the default "
+                     "teacher-forced path (not --counterfactual or --local-loss)")
 
     if args.log_file is None:
         log_path = run_dir(args.run) / "train_log.jsonl"
@@ -343,6 +390,15 @@ def main():
             [ColumnPredictorHead(args.patch_dim) for _ in range(encoder.num_patches)]
         ).to(device)
 
+    inverse_model = None
+    if args.inverse_weight > 0:
+        inverse_model = InverseModel(
+            patch_dim=args.patch_dim,
+            num_patches=encoder.num_patches,
+            num_heads=args.inverse_heads,
+            depth=args.inverse_depth,
+        ).to(device)
+
     params = (
         list(encoder.parameters())
         + list(action_encoder.parameters())
@@ -350,6 +406,8 @@ def main():
     )
     if column_heads is not None:
         params += list(column_heads.parameters())
+    if inverse_model is not None:
+        params += list(inverse_model.parameters())
     optimizer = AdamW(params, lr=args.lr)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.steps)
 
@@ -366,6 +424,8 @@ def main():
         sparse_loss_val = None
         active_groups_val = None
         live_tokens_val = None
+        inverse_loss_val = None
+        inverse_acc_val = None
         if args.counterfactual:
             mse_tf_val = None
             mse_ar_val = None
@@ -597,6 +657,15 @@ def main():
                 sparse_loss_val = sparse_pen.item()
                 loss = loss + args.sparse_change_weight * sparse_pen
 
+            if inverse_model is not None:
+                # ICM-style inverse-dynamics loss on adjacent (z_t, z_{t+1})
+                # pairs; backprops into the shared online encoder.
+                inv_loss, inverse_acc_val = inverse_dynamics_loss(
+                    z_all=z_all, actions=actions, inverse_model=inverse_model,
+                )
+                inverse_loss_val = inv_loss.item()
+                loss = loss + args.inverse_weight * inv_loss
+
             # Per-step cos_sim logging (first/last step in the H window).
             z_pred_log = z_pred[:, 0]
             z_target_log = z_target[:, 0]
@@ -656,6 +725,9 @@ def main():
                 record["active_groups"] = active_groups_val
             if live_tokens_val is not None:
                 record["live_tokens"] = live_tokens_val
+            if inverse_loss_val is not None:
+                record["inverse_loss"] = inverse_loss_val
+                record["inverse_acc"] = inverse_acc_val
             logger.log(record)
             pbar.set_postfix(loss=f"{loss.item():.4f}", z_std=f"{z_std_mean:.3f}")
 
@@ -670,6 +742,7 @@ def main():
                 action_encoder=action_encoder,
                 predictor=predictor,
                 args=args,
+                inverse_model=inverse_model,
             )
 
     save_checkpoint(
@@ -680,6 +753,7 @@ def main():
         action_encoder=action_encoder,
         predictor=predictor,
         args=args,
+        inverse_model=inverse_model,
     )
     print(f"saved final checkpoint to {args.out}")
 

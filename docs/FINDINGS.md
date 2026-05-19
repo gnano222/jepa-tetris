@@ -1114,3 +1114,51 @@ enough.
 is a non-starter; no checkpoint is carried forward. Flags `--encoder-columnar`,
 `--encoder-columnar-grid`, `--encoder-columnar-margin`, `--local-loss` remain in
 `train.py` (default off).
+
+## Exp-10 — ICM-style inverse head: shared encoder, forward + inverse (2026-05-19)
+
+*Status: implemented and smoke-tested; the full 100k comparison run is pending,
+so this entry has no Results/Conclusions yet.*
+
+**Question.** Every JEPA model here so far is a *forward* model — it predicts
+`(state, action) → next state` and never the converse. The encoder is therefore
+only ever asked "what is predictable," never "what action caused this change."
+Exp-7 showed the concrete cost: nothing in the forward loss punishes the encoder
+for *discarding piece position*, so it does. The brain's motor system instead
+runs **paired** forward and inverse models that bootstrap each other (Wolpert &
+Kawato's MOSAIC, 1998). Does adding the inverse half — in its simplest proven
+form, the ICM recipe (Pathak et al. 2017) — force the encoder to keep
+action-causal information, and at what cost to forward fidelity?
+
+**Method.** A new `InverseModel` head reads two encoded states and predicts the
+action between them: `(z_t, z_{t+1}) → (B, 4)` logits. It is the predictor's
+mirror twin — a per-patch `[z ; z' ; z'−z]` projection, spatial positional
+embeddings, a 2-layer transformer, mean-pool → linear. It is deliberately *not*
+modelled on the `Probe`, whose unordered pooling discards the spatial
+localisation that LEFT vs RIGHT depends on. Training adds one cross-entropy term
+over the H adjacent pairs in each teacher-forced window:
+`L = L_fwd + λ_inv·L_inv + VICReg`, with both `z_t` and `z_{t+1}` from the
+*online* encoder so the gradient reaches the shared encoder from both. Behind
+`--inverse-weight` (default 1.0; `0` reproduces baseline forward-only training).
+Restricted to the default teacher-forced path for v1 (errors with
+`--counterfactual` / `--local-loss`). This is the minimal first step — cycle
+consistency, a hindsight multi-step variant, and an inverse-model planner are
+explicit follow-ups, not in scope.
+
+**Smoke test.** 2000 steps, `data/buffer.npz`, batch 256, extra-token predictor.
+`inverse_acc` rises from 0.24 (≈ chance for 4 actions) to 1.00 by step 400 and
+holds; `inverse_loss` falls to ~10⁻³; forward `cos_sim` stays healthy (~0.965)
+and total `loss` is finite throughout. Confirms the wiring and that the encoder
+*can* support near-perfect action recovery — it does not yet say whether the
+auxiliary loss improves the causality metrics or trades off `cos@k`.
+
+**Success criterion (for the pending run).** Full 100k run in the film-100k
+config (`--predictor-film --encoder-stride-stages 2 --encoder-two-scale`).
+Success = M1/M2/M4 ≥ film-100k **and** `cos@k` not materially regressed — Exp-5
+is the cautionary precedent (counterfactual training won causality but lost
+long-horizon `cos@k`), so both must be reported, not causality alone.
+
+**Benchmark.** film-100k remains the default checkpoint until the Exp-10 run
+lands. Flag `--inverse-weight` (with `--inverse-depth` / `--inverse-heads`)
+is in `train.py`; the optional `inverse_model` checkpoint key loads via
+`load_jepa` and is absent from all pre-Exp-10 checkpoints.

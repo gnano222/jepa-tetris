@@ -245,6 +245,31 @@ Generalizes to any task — no Tetris-specific assumptions.
 Default is `depth=2, heads=4`. With only 7 tokens and a 128-d model, this
 is plenty of capacity, but it's untuned.
 
+## Inverse model (`jepa_tetris/models/inverse_model.py`)
+
+### ICM-style inverse head ⬅ IN PROGRESS (Exp-10)
+The predictor is a *forward* model: `(state, action) → next state`. It never
+asks the converse — *what action caused this change?* The brain's motor system
+runs **paired** forward and inverse models that bootstrap each other (Wolpert &
+Kawato's MOSAIC, 1998); the inverse half turns a goal into the motor command
+that reaches it. Exp-10 adds the inverse half in its simplest proven form — the
+ICM recipe (Pathak et al. 2017): a second head, `(z_t, z_{t+1}) → action`,
+trained jointly over the *same* encoder. Recovering the action forces the
+encoder to keep action-causal information: you cannot tell LEFT from RIGHT
+without precise piece position, so the "discard piece position" failure mode of
+Exp-7 becomes structurally impossible. It also turns the M1 action-retrieval
+*eval* metric into a training *objective*.
+
+`InverseModel` is the predictor's mirror twin — a per-patch `[z; z'; z'−z]`
+projection, spatial positional embeddings, a shallow transformer, mean-pool →
+`(B, 4)` action logits. Notably it is *not* modelled on the `Probe`: the Probe
+pools an unordered patch set, which discards the spatial localisation that LEFT
+vs RIGHT depends on. Wired into the teacher-forced path as a cross-entropy term
+behind `--inverse-weight` (default 1.0; `0` = baseline forward-only). Risk
+(per Exp-5): an extra objective can trade long-horizon `cos@k` for causality —
+the run must report both. Follow-ups if it lands: cycle consistency, a
+hindsight multi-step variant, and an inverse-model goal-conditioned planner.
+
 ## Action encoder (`jepa_tetris/models/action_encoder.py`)
 
 ### Currently Tetris-shaped; preserve the interface
@@ -333,4 +358,6 @@ Roughly increasing surgery, all encoder/predictor focused.
 7. **Heuristic distillation** (Data) — higher line-clear density in the buffer.
    DROP MSE improved dramatically with FiLM (0.107) but further gains likely
    require richer training signal on rare DROP transitions.
-8. **Structured action encoder** — only when moving beyond Tetris.
+8. **ICM-style inverse head** ⬅ IN PROGRESS — inverse-dynamics auxiliary loss
+   over the shared encoder (Exp-10). See [FINDINGS.md — Exp-10](FINDINGS.md).
+9. **Structured action encoder** — only when moving beyond Tetris.
